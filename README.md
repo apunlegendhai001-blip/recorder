@@ -99,6 +99,7 @@ Available options:
 --cookies value             Cookies to use in the request (format: key=value; key2=value2)
 --user-agent value          Custom User-Agent for the request
 --domain value              Chaturbate domain to use (default: "https://chaturbate.global/")
+--debug                     Dump full HTML to a temp file when stream detection fails, for diagnosing Cloudflare blocks
 --help, -h                  show help
 --version, -v               print the version
 ```
@@ -207,7 +208,7 @@ Pattern: video/{{.Username}}/{{.Year}}-{{.Month}}-{{.Day}}_{{.Hour}}-{{.Minute}}
  Output: video/yamiodymel/2024-01-02_13-45-00_0.ts
 ```
 
-_Note: Files are saved in `.ts` format, and this is not configurable._
+_Note: Legacy HLS streams are saved as `.ts`. LL-HLS streams (most Chaturbate streams) are saved as `.mp4` with muxed video and audio._
 
 &nbsp;
 
