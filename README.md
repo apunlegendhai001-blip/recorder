@@ -48,7 +48,13 @@ Pre-built image from [GitHub Container Registry](https://github.com/HeapOfChaos/
 
 ```bash
 # Run the container and save videos to ./videos
-$ docker run -d \n    --name my-dvr \n    --restart unless-stopped \n    -p 8080:8080 \n    -v "./videos:/usr/src/app/videos" \n    -v "./conf:/usr/src/app/conf" \n    ghcr.io/heapofchaos/chaturbate-dvr:latest
+$ docker run -d \
+    --name my-dvr \
+    --restart unless-stopped \
+    -p 8080:8080 \
+    -v "./videos:/usr/src/app/videos" \
+    -v "./conf:/usr/src/app/conf" \
+    ghcr.io/heapofchaos/chaturbate-dvr:latest
 ```
 
 ...Or build your own image using the Dockerfile in this repository.
@@ -58,7 +64,13 @@ $ docker run -d \n    --name my-dvr \n    --restart unless-stopped \n    -p 8080
 $ docker build -t chaturbate-dvr .
 
 # Run the container and save videos to ./videos
-$ docker run -d \n    --name my-dvr \n    --restart unless-stopped \n    -p 8080:8080 \n    -v "./videos:/usr/src/app/videos" \n    -v "./conf:/usr/src/app/conf" \n    chaturbate-dvr
+$ docker run -d \
+    --name my-dvr \
+    --restart unless-stopped \
+    -p 8080:8080 \
+    -v "./videos:/usr/src/app/videos" \
+    -v "./conf:/usr/src/app/conf" \
+    chaturbate-dvr
 ```
 
 ...Or use [`docker-compose.yml`](https://github.com/HeapOfChaos/chaturbate-dvr/blob/master/docker-compose.yml):
