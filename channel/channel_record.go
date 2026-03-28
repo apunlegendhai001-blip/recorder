@@ -37,6 +37,7 @@ func (ch *Channel) Monitor() {
 		isExpectedOffline := func(err error) bool {
 			return errors.Is(err, internal.ErrChannelOffline) ||
 				errors.Is(err, internal.ErrPrivateStream) ||
+				errors.Is(err, internal.ErrHiddenStream) ||
 				errors.Is(err, internal.ErrAgeVerification) ||
 				errors.Is(err, internal.ErrCloudflareBlocked) ||
 				errors.Is(err, internal.ErrRoomPasswordRequired)
@@ -48,6 +49,8 @@ func (ch *Channel) Monitor() {
 				ch.Info("channel is offline, try again in %d min(s)", server.Config.Interval)
 			} else if errors.Is(err, internal.ErrPrivateStream) {
 				ch.Info("channel is in a private show, try again in %d min(s)", server.Config.Interval)
+			} else if errors.Is(err, internal.ErrHiddenStream) {
+				ch.Info("channel is hidden, try again in %d min(s)", server.Config.Interval)
 			} else if errors.Is(err, internal.ErrCloudflareBlocked) {
 				ch.Info("channel was blocked by Cloudflare; try with `-cookies` and `-user-agent`? try again in %d min(s)", server.Config.Interval)
 			} else if errors.Is(err, internal.ErrAgeVerification) {

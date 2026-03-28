@@ -59,11 +59,14 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 		return &Stream{HLSSource: resp.HLSSource}, nil
 	}
 
-	if resp.RoomStatus == "private" {
+	switch resp.RoomStatus {
+	case "private":
 		return nil, internal.ErrPrivateStream
+	case "hidden":
+		return nil, internal.ErrHiddenStream
+	default:
+		return nil, internal.ErrChannelOffline
 	}
-
-	return nil, internal.ErrChannelOffline
 }
 
 type Stream struct {
