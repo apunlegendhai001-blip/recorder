@@ -33,9 +33,22 @@ func New() (*Manager, error) {
 	updateStream := server.CreateStream("updates")
 	updateStream.AutoReplay = false
 
-	return &Manager{
-		SSE: server,
-	}, nil
+	m := &Manager{SSE: server}
+
+	// Send a heartbeat event every 30s so browsers can detect a stale connection
+	// and the SSE extension will reconnect automatically.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			server.Publish("updates", &sse.Event{
+				Event: []byte("heartbeat"),
+				Data:  []byte(""),
+			})
+		}
+	}()
+
+	return m, nil
 }
 
 // settingsFile is the path to the persisted global settings file.
