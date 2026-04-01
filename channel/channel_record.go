@@ -158,33 +158,38 @@ func (ch *Channel) Update() {
 // It retrieves the stream information and starts watching the segments.
 func (ch *Channel) RecordStream(ctx context.Context, runID uint64, s site.Site, req *internal.Req) error {
 	streamInfo, err := s.FetchStream(ctx, req, ch.Config.Username)
+
+	// Update static metadata whenever the site API returns it, even if the room
+	// is currently offline/private/hidden.
+	changed := false
+	if streamInfo != nil {
+		if streamInfo.RoomTitle != "" && streamInfo.RoomTitle != ch.RoomTitle {
+			ch.RoomTitle = streamInfo.RoomTitle
+			ch.Config.RoomTitle = streamInfo.RoomTitle
+			changed = true
+		}
+		if streamInfo.Gender != "" && streamInfo.Gender != ch.Gender {
+			ch.Gender = streamInfo.Gender
+			ch.Config.Gender = streamInfo.Gender
+			changed = true
+		}
+		if streamInfo.SummaryCardImage != "" && streamInfo.SummaryCardImage != ch.SummaryCardImage {
+			ch.SummaryCardImage = streamInfo.SummaryCardImage
+			ch.Config.SummaryCardImage = streamInfo.SummaryCardImage
+			changed = true
+		}
+		if changed {
+			_ = server.Manager.SaveConfig()
+			ch.Update()
+		}
+	}
+
 	if err != nil {
 		return fmt.Errorf("get stream: %w", err)
 	}
 	if streamInfo == nil {
 		// Site returned nil, nil — channel is offline.
 		return fmt.Errorf("get stream: %w", internal.ErrChannelOffline)
-	}
-
-	// Update static metadata whenever the API responds.
-	changed := false
-	if streamInfo.RoomTitle != "" && streamInfo.RoomTitle != ch.RoomTitle {
-		ch.RoomTitle = streamInfo.RoomTitle
-		ch.Config.RoomTitle = streamInfo.RoomTitle
-		changed = true
-	}
-	if streamInfo.Gender != "" && streamInfo.Gender != ch.Gender {
-		ch.Gender = streamInfo.Gender
-		ch.Config.Gender = streamInfo.Gender
-		changed = true
-	}
-	if streamInfo.SummaryCardImage != "" && streamInfo.SummaryCardImage != ch.SummaryCardImage {
-		ch.SummaryCardImage = streamInfo.SummaryCardImage
-		ch.Config.SummaryCardImage = streamInfo.SummaryCardImage
-		changed = true
-	}
-	if changed {
-		_ = server.Manager.SaveConfig()
 	}
 
 	ch.StreamedAt = time.Now().Unix()

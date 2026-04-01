@@ -32,13 +32,22 @@ func New() *Chaturbate {
 func (cb *Chaturbate) FetchStream(ctx context.Context, req *internal.Req, username string) (*site.StreamInfo, error) {
 	stream, err := FetchStream(ctx, req, username)
 	if err != nil {
-		// Offline sentinel errors are not real errors for the site.Site interface.
+		info := &site.StreamInfo{}
+		if stream != nil {
+			info.RoomTitle = stream.RoomTitle
+			info.Gender = stream.Gender
+			info.NumViewers = stream.NumViewers
+			info.SummaryCardImage = stream.SummaryCardImage
+		}
+
+		// Preserve metadata on offline/private/hidden responses so the UI can
+		// still show room title/profile imagery for channels that aren't live.
 		if errors.Is(err, internal.ErrChannelOffline) ||
 			errors.Is(err, internal.ErrPrivateStream) ||
 			errors.Is(err, internal.ErrHiddenStream) {
-			return nil, err
+			return info, err
 		}
-		return nil, err
+		return info, err
 	}
 	if stream == nil || stream.HLSSource == "" {
 		return nil, nil
