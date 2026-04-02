@@ -7,13 +7,13 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/avast/retry-go/v4"
 	"github.com/HeapOfChaos/goondvr/chaturbate"
 	"github.com/HeapOfChaos/goondvr/internal"
 	"github.com/HeapOfChaos/goondvr/notifier"
 	"github.com/HeapOfChaos/goondvr/server"
 	"github.com/HeapOfChaos/goondvr/site"
 	"github.com/HeapOfChaos/goondvr/stripchat"
+	"github.com/avast/retry-go/v4"
 )
 
 // resolveSite returns the site.Site implementation for the given site name.
@@ -59,9 +59,9 @@ func (ch *Channel) Monitor(runID uint64) {
 			break
 		}
 
-			pipeline := func() error {
-				return ch.RecordStream(ctx, runID, s, req)
-			}
+		pipeline := func() error {
+			return ch.RecordStream(ctx, runID, s, req)
+		}
 		// isExpectedOffline returns true for errors where the full interval delay is appropriate.
 		// Transient errors (502, decode errors, network hiccups) should retry quickly.
 		isExpectedOffline := func(err error) bool {
@@ -157,6 +157,10 @@ func (ch *Channel) Update() {
 // RecordStream records the stream of the channel using the provided site and HTTP client.
 // It retrieves the stream information and starts watching the segments.
 func (ch *Channel) RecordStream(ctx context.Context, runID uint64, s site.Site, req *internal.Req) error {
+	ch.fileMu.Lock()
+	ch.mp4InitSegment = nil
+	ch.fileMu.Unlock()
+
 	streamInfo, err := s.FetchStream(ctx, req, ch.Config.Username)
 
 	// Update static metadata whenever the site API returns it, even if the room
@@ -266,6 +270,18 @@ func (ch *Channel) handleSegmentForMonitor(runID uint64, b []byte, duration floa
 	if ch.File == nil {
 		ch.fileMu.Unlock()
 		return fmt.Errorf("write file: no active file")
+	}
+
+	if isMP4InitSegment(b) {
+		ch.mp4InitSegment = append(ch.mp4InitSegment[:0], b...)
+	}
+	if ch.FileExt == ".mp4" && ch.Filesize == 0 && !isMP4InitSegment(b) && len(ch.mp4InitSegment) > 0 {
+		n, err := ch.File.Write(ch.mp4InitSegment)
+		if err != nil {
+			ch.fileMu.Unlock()
+			return fmt.Errorf("write mp4 init segment: %w", err)
+		}
+		ch.Filesize += n
 	}
 
 	n, err := ch.File.Write(b)

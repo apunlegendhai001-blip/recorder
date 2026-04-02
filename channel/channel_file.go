@@ -2,6 +2,7 @@ package channel
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"html/template"
@@ -213,4 +214,30 @@ func (ch *Channel) shouldSwitchFileLocked() bool {
 
 	return (ch.Duration >= float64(maxDurationSeconds) && ch.Config.MaxDuration > 0) ||
 		(ch.Filesize >= maxFilesizeBytes && ch.Config.MaxFilesize > 0)
+}
+
+// isMP4InitSegment reports whether b looks like an fMP4 init segment containing
+// top-level ftyp/moov boxes and no media fragments yet.
+func isMP4InitSegment(b []byte) bool {
+	var hasFtyp bool
+	var hasMoov bool
+
+	for pos := 0; pos+8 <= len(b); {
+		size := int(binary.BigEndian.Uint32(b[pos:]))
+		if size < 8 || pos+size > len(b) {
+			return false
+		}
+
+		switch string(b[pos+4 : pos+8]) {
+		case "ftyp":
+			hasFtyp = true
+		case "moov":
+			hasMoov = true
+		case "moof", "mdat", "mfra":
+			return false
+		}
+		pos += size
+	}
+
+	return hasFtyp && hasMoov
 }

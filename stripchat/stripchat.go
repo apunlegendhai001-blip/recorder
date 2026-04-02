@@ -33,6 +33,7 @@ type camResponse struct {
 			ID                 int64  `json:"id"`
 			Username           string `json:"username"`
 			IsOnline           bool   `json:"isOnline"`
+			IsLive             bool   `json:"isLive"`
 			Status             string `json:"status"`
 			BroadcastGender    string `json:"broadcastGender"`
 			PreviewUrlThumbBig string `json:"previewUrlThumbBig"`
@@ -100,8 +101,9 @@ func (s *Stripchat) FetchStream(ctx context.Context, req *internal.Req, username
 		)
 	}
 
-	// Offline if user is not online or not in public status.
-	if !u.IsOnline || u.Status != "public" {
+	// Stripchat can report isOnline=false for rooms that are still publicly live.
+	// Treat an active public cam as online when either flag indicates liveness.
+	if (!u.IsOnline && !u.IsLive) || u.Status != "public" {
 		return info, internal.ErrChannelOffline
 	}
 	if !resp.Cam.IsCamActive {

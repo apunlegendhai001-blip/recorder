@@ -26,7 +26,7 @@ type Channel struct {
 	Filesize            int     // Bytes
 	TotalDiskUsageBytes int64   // Total bytes across all recordings for this channel
 	Sequence            int
-	FileExt             string  // ".ts" or ".mp4", set per-stream
+	FileExt             string // ".ts" or ".mp4", set per-stream
 	RoomTitle           string
 	Gender              string
 	NumViewers          int
@@ -46,8 +46,9 @@ type Channel struct {
 	monitorDone             chan struct{}
 	doneOnce                sync.Once
 
-	File   *os.File
-	Config *entity.ChannelConfig
+	File           *os.File
+	mp4InitSegment []byte
+	Config         *entity.ChannelConfig
 }
 
 // New creates a new channel instance with the given manager and configuration.

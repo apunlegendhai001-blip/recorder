@@ -224,7 +224,6 @@ func patchTrexTrackIDs(mvexContent []byte, newID uint32) []byte {
 	return result
 }
 
-
 // zeroDurationsInTrak returns a copy of trakBox with tkhd.duration and mdhd.duration
 // both set to 0. For fragmented MP4 recordings the actual duration comes from
 // the fragment timestamps, so keeping CDN-supplied stale durations in the init
@@ -403,8 +402,8 @@ func BuildSeekIndex(path string) error {
 			if _, err := f.ReadAt(moofData, pos+8); err != nil {
 				break
 			}
-			trackID, decodeTime, tfdtPatches := scanMoofForIndex(moofData, pos)
-			if trackID != 0 {
+			entries, tfdtPatches := scanMoofForIndex(moofData, pos)
+			for trackID, decodeTime := range entries {
 				trackEntries[trackID] = append(trackEntries[trackID], tfraEntry{
 					time:   decodeTime,
 					offset: uint64(pos),
@@ -482,11 +481,10 @@ func BuildSeekIndex(path string) error {
 }
 
 // scanMoofForIndex parses moof content (without the 8-byte box header) and
-// returns the first track's ID and decode time, plus patch records for every
+// returns decode times for every traf/track found, plus patch records for every
 // tfdt found. moofFileOffset is the absolute file offset of the moof box.
-func scanMoofForIndex(moofContent []byte, moofFileOffset int64) (uint32, uint64, []tfdtPatch) {
-	var firstTrackID uint32
-	var firstDecodeTime uint64
+func scanMoofForIndex(moofContent []byte, moofFileOffset int64) (map[uint32]uint64, []tfdtPatch) {
+	entries := map[uint32]uint64{}
 	var patches []tfdtPatch
 
 	// moofContent starts at moofFileOffset+8 in the file.
@@ -503,9 +501,8 @@ func scanMoofForIndex(moofContent []byte, moofFileOffset int64) (uint32, uint64,
 			trafFileOffset := baseOffset + int64(inner) + 8
 			trackID, decodeTime, patch := scanTrafForIndex(trafContent, trafFileOffset)
 			if trackID != 0 {
-				if firstTrackID == 0 {
-					firstTrackID = trackID
-					firstDecodeTime = decodeTime
+				if _, exists := entries[trackID]; !exists {
+					entries[trackID] = decodeTime
 				}
 				if patch != nil {
 					patches = append(patches, *patch)
@@ -514,7 +511,7 @@ func scanMoofForIndex(moofContent []byte, moofFileOffset int64) (uint32, uint64,
 		}
 		inner += innerSize
 	}
-	return firstTrackID, firstDecodeTime, patches
+	return entries, patches
 }
 
 // scanTrafForIndex reads tfhd (track_id) and tfdt (decode time + file offset)
@@ -588,7 +585,6 @@ func normaliseTfdt(data []byte, minTimes map[uint32]uint64) {
 		pos += size
 	}
 }
-
 
 // extractMoofFirstTfdt returns the baseMediaDecodeTime from the first moof found
 // in data (a raw fMP4 segment). Returns (0, false) if not found.
