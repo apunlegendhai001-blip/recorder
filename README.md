@@ -2,6 +2,9 @@
 
 A self-hosted web UI and CLI for recording public livestreams from Chaturbate and Stripchat. Supports macOS, Windows, Linux, and Docker. Favicon from [Twemoji](https://github.com/twitter/twemoji).
 
+> [!IMPORTANT]
+> The original `teacat/chaturbate-dvr` repository is archived and no longer maintained. This fork remains active and includes ongoing fixes, new releases, and additional features like Stripchat support.
+
 Features added in this version include:
 
 - Updated web UI
