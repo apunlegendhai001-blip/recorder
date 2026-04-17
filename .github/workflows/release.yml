@@ -72,15 +72,38 @@ jobs:
           if [ ! -f .github/channels.json ]; then
             echo "channels=[]" >> $GITHUB_OUTPUT
             echo "has-channels=false" >> $GITHUB_OUTPUT
+            echo "Warning: .github/channels.json not found"
             exit 0
           fi
-          CHANNELS=$(cat .github/channels.json | jq -c '.channels')
-          if [ "$CHANNELS" = "[]" ] || [ "$CHANNELS" = "null" ]; then
+          
+          # Validate JSON syntax
+          if ! jq empty .github/channels.json 2>/dev/null; then
+            echo "Error: Invalid JSON in channels.json"
             echo "channels=[]" >> $GITHUB_OUTPUT
             echo "has-channels=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          CHANNELS=$(cat .github/channels.json | jq -c '.channels')
+          
+          # Validate channels array exists and is not empty
+          if [ "$CHANNELS" = "[]" ] || [ "$CHANNELS" = "null" ] || [ -z "$CHANNELS" ]; then
+            echo "channels=[]" >> $GITHUB_OUTPUT
+            echo "has-channels=false" >> $GITHUB_OUTPUT
+            echo "No channels configured"
           else
-            echo "channels=$CHANNELS" >> $GITHUB_OUTPUT
-            echo "has-channels=true" >> $GITHUB_OUTPUT
+            # Validate each channel has required fields
+            VALID_CHANNELS=$(echo "$CHANNELS" | jq -c '[.[] | select(.username != null and .username != "" and .site != null and .site != "")]')
+            
+            if [ "$VALID_CHANNELS" = "[]" ]; then
+              echo "channels=[]" >> $GITHUB_OUTPUT
+              echo "has-channels=false" >> $GITHUB_OUTPUT
+              echo "No valid channels found (missing username or site)"
+            else
+              echo "channels=$VALID_CHANNELS" >> $GITHUB_OUTPUT
+              echo "has-channels=true" >> $GITHUB_OUTPUT
+              echo "Found $(echo "$VALID_CHANNELS" | jq 'length') valid channel(s)"
+            fi
           fi
 
   # Record all channels in parallel (24/7)
@@ -108,6 +131,7 @@ jobs:
         run: go build -o goondvr .
       
       - uses: actions/cache/restore@v4
+        continue-on-error: true
         with:
           path: |
             conf/
@@ -121,6 +145,19 @@ jobs:
           USER_AGENT: ${{ secrets.USER_AGENT }}
         run: |
           mkdir -p videos conf database/backups
+          
+          # Handle missing secrets gracefully
+          COOKIE_ARG=""
+          if [ -n "$COOKIES" ]; then
+            COOKIE_ARG="-cookies \"$COOKIES\""
+          fi
+          
+          USER_AGENT_ARG=""
+          if [ -n "$USER_AGENT" ]; then
+            USER_AGENT_ARG="-user-agent \"$USER_AGENT\""
+          fi
+          
+          # Run with timeout and proper error handling
           timeout 5h ./goondvr \
             -u "${{ matrix.channel.username }}" \
             --site "${{ matrix.channel.site }}" \
@@ -132,8 +169,12 @@ jobs:
             --enable-gofile-upload \
             --finalize-mode remux \
             --ffmpeg-container mp4 \
-            ${COOKIES:+-cookies "$COOKIES"} \
-            ${USER_AGENT:+-user-agent "$USER_AGENT"} || true
+            $COOKIE_ARG \
+            $USER_AGENT_ARG || {
+              echo "Recording ended with code $?"
+              echo "This is normal - streamer may be offline or timeout reached"
+              exit 0
+            }
       
       - uses: actions/cache/save@v4
         if: always()
@@ -146,14 +187,15 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: db-${{ matrix.channel.username }}-${{ github.run_number }}
+          name: db-${{ matrix.channel.username }}-${{ matrix.channel.site }}-${{ github.run_number }}
           path: database/
           retention-days: 30
           if-no-files-found: ignore
+          compression-level: 9
 
   # Auto-restart for 24/7
   restart:
-    if: "!startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true'"
+    if: "!startsWith(github.ref, 'refs/tags/') && (success() || failure()) && needs.setup.outputs.has-channels == 'true'"
     needs: [setup, record]
     runs-on: ubuntu-latest
     steps:
@@ -164,14 +206,29 @@ jobs:
         continue-on-error: true
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          retries: 3
           script: |
-            try {
-              await github.rest.actions.createWorkflowDispatch({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                workflow_id: 'release.yml',
-                ref: context.ref.replace('refs/heads/', '')
-              });
-            } catch (error) {
-              console.log('Failed to trigger restart:', error.message);
+            const maxRetries = 3;
+            let lastError;
+            
+            for (let i = 0; i < maxRetries; i++) {
+              try {
+                await github.rest.actions.createWorkflowDispatch({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  workflow_id: 'release.yml',
+                  ref: context.ref.replace('refs/heads/', '') || 'main'
+                });
+                console.log('Successfully triggered restart');
+                return;
+              } catch (error) {
+                lastError = error;
+                console.log(`Attempt ${i + 1} failed: ${error.message}`);
+                if (i < maxRetries - 1) {
+                  await new Promise(resolve => setTimeout(resolve, 5000));
+                }
+              }
             }
+            
+            console.log('All restart attempts failed:', lastError.message);
+            console.log('Workflow will resume on next scheduled run');
