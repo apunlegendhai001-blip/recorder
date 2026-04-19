@@ -152,8 +152,11 @@ jobs:
           path: |
             conf/
             database/
+            videos/
           key: state-${{ matrix.channel.username }}-${{ github.run_id }}
-          restore-keys: state-${{ matrix.channel.username }}-
+          restore-keys: |
+            state-${{ matrix.channel.username }}-
+            state-${{ matrix.channel.username }}-resume-
       
       - name: Wait for FlareSolverr
         run: |
@@ -182,9 +185,43 @@ jobs:
         run: |
           mkdir -p videos conf database/backups processing-queue
           
+          # Check for resumed recordings
+          EXISTING_FILES=$(find videos -type f -name "*.ts" 2>/dev/null | wc -l || echo "0")
+          if [ "$EXISTING_FILES" -gt 0 ]; then
+            echo "=== Resume Detected ==="
+            echo "Found $EXISTING_FILES existing recording(s) from previous run"
+            echo "Will continue recording and mark completed files"
+            echo "======================="
+          fi
+          
+          # Check available disk space
+          echo "=== Disk Space Check ==="
+          AVAILABLE_GB=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
+          echo "Available disk space: ${AVAILABLE_GB}GB"
+          
+          if [ "$AVAILABLE_GB" -lt 3 ]; then
+            echo "ERROR: Insufficient disk space (need at least 3GB, have ${AVAILABLE_GB}GB)"
+            exit 1
+          fi
+          
+          echo "✓ Disk space check passed"
+          echo "========================"
+          
           # Sanitize cookies - remove any newlines or control characters
           CLEAN_COOKIES=$(echo "$COOKIES" | tr -d '\n\r\t' | tr -s ' ')
           CLEAN_UA=$(echo "$USER_AGENT" | tr -d '\n\r\t' | tr -s ' ')
+          
+          # Check if secrets are configured
+          if [ -z "$CLEAN_COOKIES" ] || [ "$CLEAN_COOKIES" = " " ]; then
+            echo "⚠️  WARNING: CHATURBATE_COOKIES secret is empty or not set"
+            echo "Some features may not work without authentication"
+          fi
+          
+          if [ -z "$CLEAN_UA" ] || [ "$CLEAN_UA" = " " ]; then
+            echo "⚠️  WARNING: USER_AGENT secret is empty or not set"
+            CLEAN_UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            echo "Using default user agent"
+          fi
           
           # Debug: Show cookie length (not content for security)
           echo "Cookie string length: ${#CLEAN_COOKIES}"
@@ -207,31 +244,52 @@ jobs:
           # Debug: Verify settings.json was created properly
           echo "Settings file created, size: $(wc -c < conf/settings.json) bytes"
           
-          # Start background uploader that monitors for completed .ts files
+          # Start background monitor for disk space and file marking
           (
             while true; do
               sleep 60  # Check every minute
               
+              # Monitor disk space
+              AVAILABLE_GB=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
+              USED_PERCENT=$(df -h . | awk 'NR==2 {print $5}' | sed 's/%//')
+              
               # Show current recording status
               echo "=== Recording Status ($(date)) ==="
+              echo "Disk: ${AVAILABLE_GB}GB available (${USED_PERCENT}% used)"
               find videos -type f -name "*.ts" -exec ls -lh {} \; 2>/dev/null || echo "No files yet"
               echo "================================"
+              
+              # Warn if disk space is low
+              if [ "$AVAILABLE_GB" -lt 2 ]; then
+                echo "⚠️  WARNING: Low disk space (${AVAILABLE_GB}GB remaining)"
+              fi
+              
+              # Emergency stop if critically low
+              if [ "$AVAILABLE_GB" -lt 1 ]; then
+                echo "🛑 CRITICAL: Disk space exhausted (${AVAILABLE_GB}GB remaining)"
+                echo "Stopping recording to prevent job failure..."
+                pkill -f goondvr || true
+                break
+              fi
               
               # Find .ts files that haven't been uploaded yet
               find videos -type f -name "*.ts" 2>/dev/null | while read TS_FILE; do
                 if [ -f "$TS_FILE" ]; then
-                  # Check if file is still being written (size changing)
-                  SIZE1=$(stat -c%s "$TS_FILE" 2>/dev/null || stat -f%z "$TS_FILE" 2>/dev/null)
-                  sleep 2
-                  SIZE2=$(stat -c%s "$TS_FILE" 2>/dev/null || stat -f%z "$TS_FILE" 2>/dev/null)
+                  # Skip if already marked
+                  MARKER="${TS_FILE}.uploaded"
+                  if [ -f "$MARKER" ]; then
+                    continue
+                  fi
                   
-                  # If size is stable, file is complete
-                  if [ "$SIZE1" = "$SIZE2" ]; then
-                    MARKER="${TS_FILE}.uploaded"
-                    if [ ! -f "$MARKER" ]; then
-                      echo "Marking completed file for upload: $(basename "$TS_FILE")"
-                      touch "$MARKER"
-                    fi
+                  # Check if file is still being written (size changing)
+                  SIZE1=$(stat -c%s "$TS_FILE" 2>/dev/null || stat -f%z "$TS_FILE" 2>/dev/null || echo "0")
+                  sleep 2
+                  SIZE2=$(stat -c%s "$TS_FILE" 2>/dev/null || stat -f%z "$TS_FILE" 2>/dev/null || echo "0")
+                  
+                  # If size is stable and non-zero, file is complete
+                  if [ "$SIZE1" = "$SIZE2" ] && [ "$SIZE1" -gt 0 ]; then
+                    echo "Marking completed file for upload: $(basename "$TS_FILE") (${SIZE1} bytes)"
+                    touch "$MARKER"
                   fi
                 fi
               done
@@ -240,27 +298,39 @@ jobs:
           UPLOADER_PID=$!
           
           # Record without conversion/upload - just save .ts files
+          # 45-minute chunks to stay well under artifact size limits
           timeout 5h ./goondvr \
             -u "${{ matrix.channel.username }}" \
             --site "${{ matrix.channel.site }}" \
             -resolution 9999 \
             -framerate 60 \
             -interval 1 \
-            -max-duration 240 \
+            -max-duration 45 \
             -max-filesize 0 \
             --debug || {
-              echo "Recording ended with code $?"
-              echo "This is normal - streamer may be offline or timeout reached"
+              EXIT_CODE=$?
+              echo "Recording ended with code $EXIT_CODE"
+              if [ $EXIT_CODE -eq 124 ]; then
+                echo "⏱️  Timeout reached (5 hours) - will auto-restart"
+              else
+                echo "This is normal - streamer may be offline or timeout reached"
+              fi
             }
           
           # Stop the background uploader
           kill $UPLOADER_PID 2>/dev/null || true
           
-          # Mark any remaining files as complete
+          # Mark any remaining files as complete (only if non-empty)
           find videos -type f -name "*.ts" 2>/dev/null | while read TS_FILE; do
             if [ -f "$TS_FILE" ]; then
-              touch "${TS_FILE}.uploaded"
-              echo "Marked: $(basename "$TS_FILE")"
+              FILE_SIZE=$(stat -c%s "$TS_FILE" 2>/dev/null || stat -f%z "$TS_FILE" 2>/dev/null || echo "0")
+              if [ "$FILE_SIZE" -gt 0 ]; then
+                touch "${TS_FILE}.uploaded"
+                echo "Marked: $(basename "$TS_FILE") (${FILE_SIZE} bytes)"
+              else
+                echo "Skipping empty file: $(basename "$TS_FILE")"
+                rm -f "$TS_FILE"
+              fi
             fi
           done
           
@@ -276,8 +346,36 @@ jobs:
           find videos -type f -name "*.uploaded" -exec ls -lh {} \; 2>/dev/null || echo "No .uploaded markers found"
           echo "======================"
       
-      - name: Upload raw recordings for processing
+      - name: Check artifact size before upload
         if: always()
+        id: check-size
+        run: |
+          if [ -d videos ]; then
+            TOTAL_SIZE=$(du -sb videos 2>/dev/null | cut -f1 || echo "0")
+            TOTAL_GB=$(echo "scale=2; $TOTAL_SIZE / 1024 / 1024 / 1024" | bc)
+            echo "Total artifact size: ${TOTAL_GB}GB"
+            echo "size_gb=$TOTAL_GB" >> $GITHUB_OUTPUT
+            
+            # Warn if approaching 10GB limit
+            if (( $(echo "$TOTAL_GB > 8" | bc -l) )); then
+              echo "⚠️  WARNING: Artifact size (${TOTAL_GB}GB) approaching 10GB limit"
+              echo "Consider splitting into multiple artifacts"
+            fi
+            
+            # Check if we need to split
+            if (( $(echo "$TOTAL_GB > 9" | bc -l) )); then
+              echo "needs_split=true" >> $GITHUB_OUTPUT
+              echo "🔀 Artifact too large, will split into chunks"
+            else
+              echo "needs_split=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "size_gb=0" >> $GITHUB_OUTPUT
+            echo "needs_split=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Upload raw recordings (normal)
+        if: always() && steps.check-size.outputs.needs_split != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: raw-videos-${{ matrix.channel.username }}-${{ github.run_number }}
@@ -288,13 +386,44 @@ jobs:
           if-no-files-found: ignore
           compression-level: 0
       
+      - name: Split large recordings
+        if: always() && steps.check-size.outputs.needs_split == 'true'
+        run: |
+          echo "⚠️  Artifact size exceeds safe limit - cleaning up old files"
+          
+          # Delete oldest files until under 8GB
+          TARGET_SIZE=$((8 * 1024 * 1024 * 1024))  # 8GB target
+          
+          while true; do
+            CURRENT_SIZE=$(du -sb videos 2>/dev/null | cut -f1 || echo "0")
+            if [ "$CURRENT_SIZE" -le "$TARGET_SIZE" ]; then
+              break
+            fi
+            
+            # Find and delete oldest .ts file
+            OLDEST=$(find videos -type f -name "*.ts" -printf '%T+ %p\n' 2>/dev/null | sort | head -1 | cut -d' ' -f2-)
+            if [ -z "$OLDEST" ]; then
+              break
+            fi
+            
+            echo "Deleting oldest file to free space: $(basename "$OLDEST")"
+            rm -f "$OLDEST" "${OLDEST}.uploaded"
+          done
+          
+          FINAL_SIZE=$(du -sb videos 2>/dev/null | cut -f1 || echo "0")
+          FINAL_GB=$(echo "scale=2; $FINAL_SIZE / 1024 / 1024 / 1024" | bc)
+          echo "Reduced artifact size to ${FINAL_GB}GB"
+      
+
+      
       - uses: actions/cache/save@v4
         if: always()
         with:
           path: |
             conf/
             database/
-          key: state-${{ matrix.channel.username }}-${{ github.run_id }}
+            videos/
+          key: state-${{ matrix.channel.username }}-resume-${{ github.run_id }}
       
       - uses: actions/upload-artifact@v4
         if: always()
@@ -327,8 +456,9 @@ jobs:
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          name: raw-videos-${{ matrix.channel.username }}-${{ github.run_number }}
+          pattern: raw-videos-${{ matrix.channel.username }}-${{ github.run_number }}*
           path: videos/
+          merge-multiple: true
       
       - name: Restore database
         uses: actions/cache/restore@v4
@@ -343,10 +473,19 @@ jobs:
           mkdir -p database/backups processed
           
           echo "=== Processing Job Started ==="
+          
+          # Check available disk space
+          AVAILABLE_GB=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
+          echo "Available disk space: ${AVAILABLE_GB}GB"
+          
+          if [ "$AVAILABLE_GB" -lt 2 ]; then
+            echo "⚠️  WARNING: Low disk space for processing (${AVAILABLE_GB}GB)"
+          fi
+          
           echo "Looking for completed .ts files to process..."
           
-          # Find all .ts files that have .uploaded marker (limit to 100 per run)
-          COMPLETED_FILES=$(find videos -type f -name "*.uploaded" 2>/dev/null | head -100 || true)
+          # Find all .ts files that have .uploaded marker (limit to 50 per run for safety)
+          COMPLETED_FILES=$(find videos -type f -name "*.uploaded" 2>/dev/null | sort | head -50 || true)
           
           if [ -z "$COMPLETED_FILES" ]; then
             echo "No completed files found to process"
@@ -354,7 +493,7 @@ jobs:
           fi
           
           FILE_COUNT=$(echo "$COMPLETED_FILES" | wc -l)
-          echo "Found $FILE_COUNT completed file(s) to process (max 100 per run)"
+          echo "Found $FILE_COUNT completed file(s) to process (max 50 per run)"
           
           # Check if jq is available
           if ! command -v jq &> /dev/null; then
@@ -362,12 +501,24 @@ jobs:
             exit 1
           fi
           
+          PROCESSED_COUNT=0
+          FAILED_COUNT=0
+          
           # Process each completed file
           for MARKER in $COMPLETED_FILES; do
             TS_FILE="${MARKER%.uploaded}"
             
             if [ ! -f "$TS_FILE" ]; then
               echo "Warning: Marker found but file missing: $TS_FILE"
+              rm -f "$MARKER"
+              continue
+            fi
+            
+            # Skip empty or corrupted files
+            TS_SIZE_BYTES=$(stat -c%s "$TS_FILE" 2>/dev/null || stat -f%z "$TS_FILE" 2>/dev/null || echo "0")
+            if [ "$TS_SIZE_BYTES" -lt 1024 ]; then
+              echo "Warning: File too small or empty: $TS_FILE (${TS_SIZE_BYTES} bytes)"
+              rm -f "$TS_FILE" "$MARKER"
               continue
             fi
             
@@ -376,101 +527,195 @@ jobs:
             
             echo ""
             echo "=== Processing: $BASENAME ==="
-            echo "Input: $TS_FILE ($(du -h "$TS_FILE" | cut -f1))"
+            
+            # Check disk space before processing
+            AVAILABLE_GB=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
+            if [ "$AVAILABLE_GB" -lt 1 ]; then
+              echo "⚠️  Skipping: Insufficient disk space (${AVAILABLE_GB}GB)"
+              continue
+            fi
+            
+            TS_SIZE=$(du -h "$TS_FILE" | cut -f1)
+            echo "Input: $TS_FILE ($TS_SIZE)"
             
             # Step 1: Convert to MP4
             echo "Converting to MP4..."
-            if ffmpeg -nostdin -y -i "$TS_FILE" -c copy -movflags +faststart "$MP4_FILE" 2>&1 | tail -20; then
-              echo "✓ Conversion successful: $MP4_FILE ($(du -h "$MP4_FILE" | cut -f1))"
+            CONVERT_START=$(date +%s)
+            if timeout 30m ffmpeg -nostdin -y -i "$TS_FILE" -c copy -movflags +faststart "$MP4_FILE" 2>&1 | tail -20; then
+              CONVERT_END=$(date +%s)
+              CONVERT_DURATION=$((CONVERT_END - CONVERT_START))
+              MP4_SIZE=$(du -h "$MP4_FILE" | cut -f1)
+              echo "✓ Conversion successful: $MP4_FILE ($MP4_SIZE) in ${CONVERT_DURATION}s"
               
-              # Step 2: Upload to GoFile
+              # Verify MP4 was created successfully
+              if [ ! -f "$MP4_FILE" ]; then
+                echo "✗ MP4 file not created"
+                FAILED_COUNT=$((FAILED_COUNT + 1))
+                rm -f "$MARKER"
+                continue
+              fi
+              
+              # Check MP4 file size before upload
+              MP4_SIZE_BYTES=$(stat -c%s "$MP4_FILE" 2>/dev/null || stat -f%z "$MP4_FILE" 2>/dev/null || echo "0")
+              
+              if [ "$MP4_SIZE_BYTES" -lt 1024 ]; then
+                echo "✗ MP4 file is empty or corrupted"
+                rm -f "$MP4_FILE" "$MARKER"
+                FAILED_COUNT=$((FAILED_COUNT + 1))
+                continue
+              fi
+              
+              MP4_SIZE_GB=$(echo "scale=2; $MP4_SIZE_BYTES / 1024 / 1024 / 1024" | bc)
+              
+              if (( $(echo "$MP4_SIZE_GB > 5" | bc -l) )); then
+                echo "⚠️  WARNING: Large file (${MP4_SIZE_GB}GB) - upload may be slow"
+              fi
+              
+              # Step 2: Upload to GoFile with retry
               echo "Uploading to GoFile..."
               
-              # Get best server
-              echo "Getting best GoFile server..."
-              SERVER_RESPONSE=$(curl -s https://api.gofile.io/servers)
-              SERVER=$(echo "$SERVER_RESPONSE" | jq -r '.data.servers[0].name' 2>/dev/null || echo "store1")
-              echo "Using server: $SERVER"
+              UPLOAD_SUCCESS=false
+              UPLOAD_ATTEMPTS=0
+              MAX_UPLOAD_ATTEMPTS=3
               
-              UPLOAD_START=$(date +%s)
-              
-              # Upload to selected server
-              UPLOAD_RESPONSE=$(curl -X POST "https://${SERVER}.gofile.io/contents/uploadfile" \
-                -F "file=@$MP4_FILE" \
-                -w "\n%{http_code}" \
-                -s)
-              
-              HTTP_CODE=$(echo "$UPLOAD_RESPONSE" | tail -1)
-              RESPONSE_BODY=$(echo "$UPLOAD_RESPONSE" | head -n -1)
-              
-              UPLOAD_END=$(date +%s)
-              UPLOAD_DURATION=$((UPLOAD_END - UPLOAD_START))
-              
-              if [ "$HTTP_CODE" = "200" ]; then
-                DOWNLOAD_LINK=$(echo "$RESPONSE_BODY" | jq -r '.data.downloadPage' 2>/dev/null || echo "")
+              while [ $UPLOAD_ATTEMPTS -lt $MAX_UPLOAD_ATTEMPTS ] && [ "$UPLOAD_SUCCESS" = "false" ]; do
+                UPLOAD_ATTEMPTS=$((UPLOAD_ATTEMPTS + 1))
                 
-                if [ ! -z "$DOWNLOAD_LINK" ] && [ "$DOWNLOAD_LINK" != "null" ]; then
-                  echo "✓ Upload successful!"
-                  echo "  Link: $DOWNLOAD_LINK"
-                  echo "  Duration: ${UPLOAD_DURATION}s"
-                  
-                  # Save to database
-                  FILESIZE=$(stat -f%z "$MP4_FILE" 2>/dev/null || stat -c%s "$MP4_FILE" 2>/dev/null || echo "0")
-                  UPLOAD_SPEED=$(echo "scale=2; $FILESIZE / $UPLOAD_DURATION / 1024 / 1024" | bc 2>/dev/null || echo "0")
-                  
-                  # Create/update database
-                  if [ ! -f database/uploads.json ]; then
-                    echo '{"records":[]}' > database/uploads.json
-                  fi
-                  
-                  RECORD=$(jq -n \
-                    --arg id "${{ matrix.channel.username }}_$(date +%s)" \
-                    --arg username "${{ matrix.channel.username }}" \
-                    --arg site "${{ matrix.channel.site }}" \
-                    --arg filename "$BASENAME.mp4" \
-                    --arg link "$DOWNLOAD_LINK" \
-                    --arg uploaded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                    --arg filesize "$FILESIZE" \
-                    --arg upload_duration "$UPLOAD_DURATION" \
-                    --arg upload_speed "$UPLOAD_SPEED" \
-                    '{
-                      id: $id,
-                      username: $username,
-                      site: $site,
-                      filename: $filename,
-                      gofile_link: $link,
-                      uploaded_at: $uploaded_at,
-                      filesize_bytes: ($filesize | tonumber),
-                      upload_duration: ($upload_duration | tonumber),
-                      upload_speed: ($upload_speed | tonumber),
-                      status: "uploaded"
-                    }')
-                  
-                  jq ".records += [$RECORD]" database/uploads.json > database/uploads.json.tmp
-                  mv database/uploads.json.tmp database/uploads.json
-                  
-                  # Step 3: Delete local files
-                  echo "Deleting local files..."
-                  rm -f "$TS_FILE" "$MP4_FILE"
-                  echo "✓ Local files deleted"
+                if [ $UPLOAD_ATTEMPTS -gt 1 ]; then
+                  echo "Retry attempt $UPLOAD_ATTEMPTS of $MAX_UPLOAD_ATTEMPTS..."
+                  sleep 5
+                fi
+                
+                # Get best server with fallback
+                echo "Getting best GoFile server..."
+                SERVER_RESPONSE=$(curl -s --max-time 10 https://api.gofile.io/servers 2>/dev/null || echo "")
+                
+                if [ -z "$SERVER_RESPONSE" ]; then
+                  SERVER="store1"
+                  echo "Using fallback server: $SERVER"
                 else
-                  echo "✗ Upload failed: Invalid response"
+                  SERVER=$(echo "$SERVER_RESPONSE" | jq -r '.data.servers[0].name' 2>/dev/null || echo "store1")
+                  if [ -z "$SERVER" ] || [ "$SERVER" = "null" ]; then
+                    SERVER="store1"
+                  fi
+                  echo "Using server: $SERVER"
+                fi
+                
+                UPLOAD_START=$(date +%s)
+                
+                # Upload to selected server with timeout (max 60 minutes)
+                UPLOAD_RESPONSE=$(timeout 60m curl -X POST "https://${SERVER}.gofile.io/contents/uploadfile" \
+                  -F "file=@$MP4_FILE" \
+                  -w "\n%{http_code}" \
+                  -s 2>/dev/null || echo "timeout\n000")
+                
+                HTTP_CODE=$(echo "$UPLOAD_RESPONSE" | tail -1)
+                RESPONSE_BODY=$(echo "$UPLOAD_RESPONSE" | head -n -1)
+                
+                UPLOAD_END=$(date +%s)
+                UPLOAD_DURATION=$((UPLOAD_END - UPLOAD_START))
+              
+                if [ "$HTTP_CODE" = "200" ]; then
+                  DOWNLOAD_LINK=$(echo "$RESPONSE_BODY" | jq -r '.data.downloadPage' 2>/dev/null || echo "")
+                  
+                  if [ ! -z "$DOWNLOAD_LINK" ] && [ "$DOWNLOAD_LINK" != "null" ]; then
+                    UPLOAD_SUCCESS=true
+                    echo "✓ Upload successful!"
+                    echo "  Link: $DOWNLOAD_LINK"
+                    echo "  Duration: ${UPLOAD_DURATION}s"
+                    
+                    # Calculate upload speed
+                    FILESIZE=$(stat -f%z "$MP4_FILE" 2>/dev/null || stat -c%s "$MP4_FILE" 2>/dev/null || echo "0")
+                    if [ $UPLOAD_DURATION -gt 0 ]; then
+                      UPLOAD_SPEED=$(echo "scale=2; $FILESIZE / $UPLOAD_DURATION / 1024 / 1024" | bc 2>/dev/null || echo "0")
+                      echo "  Speed: ${UPLOAD_SPEED} MB/s"
+                    else
+                      UPLOAD_SPEED="0"
+                    fi
+                    
+                    # Create/update database
+                    if [ ! -f database/uploads.json ]; then
+                      echo '{"records":[]}' > database/uploads.json
+                    fi
+                    
+                    RECORD=$(jq -n \
+                      --arg id "${{ matrix.channel.username }}_$(date +%s)" \
+                      --arg username "${{ matrix.channel.username }}" \
+                      --arg site "${{ matrix.channel.site }}" \
+                      --arg filename "$BASENAME.mp4" \
+                      --arg link "$DOWNLOAD_LINK" \
+                      --arg uploaded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                      --arg filesize "$FILESIZE" \
+                      --arg upload_duration "$UPLOAD_DURATION" \
+                      --arg upload_speed "$UPLOAD_SPEED" \
+                      --arg convert_duration "$CONVERT_DURATION" \
+                      '{
+                        id: $id,
+                        username: $username,
+                        site: $site,
+                        filename: $filename,
+                        gofile_link: $link,
+                        uploaded_at: $uploaded_at,
+                        filesize_bytes: ($filesize | tonumber),
+                        upload_duration: ($upload_duration | tonumber),
+                        upload_speed: ($upload_speed | tonumber),
+                        convert_duration: ($convert_duration | tonumber),
+                        status: "uploaded"
+                      }')
+                    
+                    jq ".records += [$RECORD]" database/uploads.json > database/uploads.json.tmp
+                    mv database/uploads.json.tmp database/uploads.json
+                    
+                    # Step 3: Delete local files
+                    echo "Deleting local files..."
+                    rm -f "$TS_FILE" "$MP4_FILE" "$MARKER"
+                    echo "✓ Local files deleted"
+                    
+                    PROCESSED_COUNT=$((PROCESSED_COUNT + 1))
+                  else
+                    echo "✗ Upload failed: Invalid response"
+                    echo "Response: $RESPONSE_BODY"
+                  fi
+                elif [ "$HTTP_CODE" = "000" ]; then
+                  echo "✗ Upload timeout or network error"
+                else
+                  echo "✗ Upload failed with HTTP $HTTP_CODE"
                   echo "Response: $RESPONSE_BODY"
                 fi
-              else
-                echo "✗ Upload failed with HTTP $HTTP_CODE"
-                echo "Response: $RESPONSE_BODY"
+              done
+              
+              if [ "$UPLOAD_SUCCESS" = "false" ]; then
+                echo "✗ Upload failed after $MAX_UPLOAD_ATTEMPTS attempts"
+                FAILED_COUNT=$((FAILED_COUNT + 1))
+                # Keep files for retry in next run
               fi
             else
-              echo "✗ Conversion failed"
+              echo "✗ Conversion failed or timed out"
+              FAILED_COUNT=$((FAILED_COUNT + 1))
+              # Remove marker so it can be retried
+              rm -f "$MARKER"
             fi
           done
           
           echo ""
           echo "=== Processing Complete ==="
+          echo "Processed: $PROCESSED_COUNT files"
+          echo "Failed: $FAILED_COUNT files"
           if [ -f database/uploads.json ]; then
-            echo "Total uploads: $(jq '.records | length' database/uploads.json)"
+            TOTAL_UPLOADS=$(jq '.records | length' database/uploads.json)
+            echo "Total uploads in database: $TOTAL_UPLOADS"
+            
+            # Calculate total uploaded size
+            TOTAL_SIZE=$(jq '[.records[].filesize_bytes] | add // 0' database/uploads.json 2>/dev/null || echo "0")
+            if [ "$TOTAL_SIZE" -gt 0 ]; then
+              TOTAL_SIZE_GB=$(echo "scale=2; $TOTAL_SIZE / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
+              echo "Total uploaded: ${TOTAL_SIZE_GB}GB"
+            fi
           fi
+          
+          # Show remaining disk space
+          FINAL_AVAILABLE=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
+          echo "Final disk space: ${FINAL_AVAILABLE}GB available"
       
       - name: Save database
         uses: actions/cache/save@v4
@@ -495,7 +740,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Wait before restart
-        run: sleep 30
+        run: |
+          # Random delay between 30-60 seconds to avoid thundering herd
+          DELAY=$((30 + RANDOM % 31))
+          echo "Waiting ${DELAY} seconds before restart..."
+          sleep $DELAY
       
       - uses: actions/github-script@v7
         continue-on-error: true
