@@ -703,7 +703,8 @@ jobs:
           # Find all video files that have .uploaded marker (limit based on max_duration)
           # Fewer files for large chunks to stay within timeout
           MAX_FILES=50
-          if [ "${{ inputs.max_duration }}" -gt 120 ]; then
+          MAX_DURATION="${{ inputs.max_duration || '45' }}"
+          if [ "$MAX_DURATION" -gt 120 ]; then
             MAX_FILES=25
             echo "Large chunk size detected - limiting to 25 files per run"
           fi
