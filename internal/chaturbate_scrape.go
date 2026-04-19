@@ -137,6 +137,8 @@ func ScrapeChaturbateStreamWithFlareSolverr(ctx context.Context, username string
 			hlsURL := strings.ReplaceAll(matches[1], `\/`, `/`)
 			// Unescape unicode characters like \u002D
 			hlsURL = unescapeUnicode(hlsURL)
+			// Clean up trailing characters
+			hlsURL = strings.TrimRight(hlsURL, `",;`)
 			if server.Config.Debug {
 				fmt.Printf("[DEBUG] Found HLS URL with pattern %s: %s\n", pattern, hlsURL)
 			}
@@ -145,6 +147,8 @@ func ScrapeChaturbateStreamWithFlareSolverr(ctx context.Context, username string
 			hlsURL := matches[0]
 			// Unescape unicode characters
 			hlsURL = unescapeUnicode(hlsURL)
+			// Clean up trailing characters
+			hlsURL = strings.TrimRight(hlsURL, `",;`)
 			if server.Config.Debug {
 				fmt.Printf("[DEBUG] Found HLS URL: %s\n", hlsURL)
 			}
