@@ -138,8 +138,8 @@ jobs:
         with:
           go-version: '1.24'
       
-      - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg bc jq
       
       - name: Build
         run: |
@@ -258,7 +258,7 @@ jobs:
               # Show current recording status
               echo "=== Recording Status ($(date)) ==="
               echo "Disk: ${AVAILABLE_GB}GB available (${USED_PERCENT}% used)"
-              find videos -type f -name "*.ts" -exec ls -lh {} \; 2>/dev/null || echo "No files yet"
+              find videos -type f \( -name "*.ts" -o -name "*.mp4" \) -exec ls -lh {} \; 2>/dev/null || echo "No files yet"
               echo "================================"
               
               # Warn if disk space is low
@@ -452,8 +452,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg bc jq
       
       - name: Download raw recordings
         uses: actions/download-artifact@v4
@@ -469,7 +469,9 @@ jobs:
         with:
           path: database/
           key: state-${{ matrix.channel.username }}-${{ github.run_id }}
-          restore-keys: state-${{ matrix.channel.username }}-
+          restore-keys: |
+            state-${{ matrix.channel.username }}-resume-
+            state-${{ matrix.channel.username }}-
       
       - name: Process recordings
         run: |
@@ -510,6 +512,7 @@ jobs:
           # Process each completed file
           for MARKER in $COMPLETED_FILES; do
             VIDEO_FILE="${MARKER%.uploaded}"
+            CONVERT_DURATION=0  # Initialize to prevent undefined variable
             
             if [ ! -f "$VIDEO_FILE" ]; then
               echo "Warning: Marker found but file missing: $VIDEO_FILE"
@@ -564,8 +567,8 @@ jobs:
                 continue
               fi
             fi
-              
-              # Verify MP4 was created successfully
+            
+            # Verify MP4 was created successfully
               if [ ! -f "$MP4_FILE" ]; then
                 echo "✗ MP4 file not created"
                 FAILED_COUNT=$((FAILED_COUNT + 1))
@@ -634,6 +637,14 @@ jobs:
                 UPLOAD_DURATION=$((UPLOAD_END - UPLOAD_START))
               
                 if [ "$HTTP_CODE" = "200" ]; then
+                  # Validate response structure
+                  if ! echo "$RESPONSE_BODY" | jq -e '.status == "ok"' >/dev/null 2>&1; then
+                    ERROR_MSG=$(echo "$RESPONSE_BODY" | jq -r '.status' 2>/dev/null || echo "Invalid response structure")
+                    echo "✗ GoFile API error: $ERROR_MSG"
+                    echo "Response: $RESPONSE_BODY"
+                    continue
+                  fi
+                  
                   DOWNLOAD_LINK=$(echo "$RESPONSE_BODY" | jq -r '.data.downloadPage' 2>/dev/null || echo "")
                   
                   if [ ! -z "$DOWNLOAD_LINK" ] && [ "$DOWNLOAD_LINK" != "null" ]; then
@@ -660,7 +671,7 @@ jobs:
                       --arg id "${{ matrix.channel.username }}_$(date +%s)" \
                       --arg username "${{ matrix.channel.username }}" \
                       --arg site "${{ matrix.channel.site }}" \
-                      --arg filename "$BASENAME.mp4" \
+                      --arg filename "$(basename "$MP4_FILE")" \
                       --arg link "$DOWNLOAD_LINK" \
                       --arg uploaded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
                       --arg filesize "$FILESIZE" \
@@ -681,8 +692,12 @@ jobs:
                         status: "uploaded"
                       }')
                     
-                    jq ".records += [$RECORD]" database/uploads.json > database/uploads.json.tmp
-                    mv database/uploads.json.tmp database/uploads.json
+                    if jq ".records += [$RECORD]" database/uploads.json > database/uploads.json.tmp 2>/dev/null; then
+                      mv database/uploads.json.tmp database/uploads.json
+                    else
+                      echo "✗ Failed to update database"
+                      rm -f database/uploads.json.tmp
+                    fi
                     
                     # Step 3: Delete local files
                     echo "Deleting local files..."
@@ -694,6 +709,12 @@ jobs:
                     echo "✗ Upload failed: Invalid response"
                     echo "Response: $RESPONSE_BODY"
                   fi
+                elif [ "$HTTP_CODE" = "429" ]; then
+                  echo "✗ Rate limited by GoFile API"
+                  # Exponential backoff for rate limits
+                  BACKOFF=$((5 * UPLOAD_ATTEMPTS))
+                  echo "Waiting ${BACKOFF} seconds before retry..."
+                  sleep $BACKOFF
                 elif [ "$HTTP_CODE" = "000" ]; then
                   echo "✗ Upload timeout or network error"
                 else
@@ -729,6 +750,12 @@ jobs:
           # Show remaining disk space
           FINAL_AVAILABLE=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
           echo "Final disk space: ${FINAL_AVAILABLE}GB available"
+          
+          # Cleanup processed directory
+          if [ -d processed ]; then
+            echo "Cleaning up processed directory..."
+            rm -rf processed
+          fi
       
       - name: Save database
         uses: actions/cache/save@v4
@@ -768,13 +795,23 @@ jobs:
             const maxRetries = 3;
             let lastError;
             
+            // Determine the correct branch
+            let branch = 'main';
+            if (context.ref && context.ref.startsWith('refs/heads/')) {
+              branch = context.ref.replace('refs/heads/', '');
+            } else if (context.payload && context.payload.ref) {
+              branch = context.payload.ref;
+            }
+            
+            console.log(`Attempting to restart workflow on branch: ${branch}`);
+            
             for (let i = 0; i < maxRetries; i++) {
               try {
                 await github.rest.actions.createWorkflowDispatch({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   workflow_id: 'release.yml',
-                  ref: context.ref.replace('refs/heads/', '') || 'main'
+                  ref: branch
                 });
                 console.log('Successfully triggered restart');
                 return;
