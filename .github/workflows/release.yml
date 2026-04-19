@@ -155,6 +155,24 @@ jobs:
           key: state-${{ matrix.channel.username }}-${{ github.run_id }}
           restore-keys: state-${{ matrix.channel.username }}-
       
+      - name: Wait for FlareSolverr
+        run: |
+          echo "Waiting for FlareSolverr to be ready..."
+          for i in {1..30}; do
+            if curl -s http://localhost:8191/v1 > /dev/null 2>&1; then
+              echo "FlareSolverr is ready!"
+              break
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 2
+          done
+          
+          # Test FlareSolverr
+          echo "Testing FlareSolverr..."
+          curl -s -X POST http://localhost:8191/v1 \
+            -H "Content-Type: application/json" \
+            -d '{"cmd":"request.get","url":"https://chaturbate.com","maxTimeout":60000}' | jq .
+      
       - name: Record
         id: record
         env:
