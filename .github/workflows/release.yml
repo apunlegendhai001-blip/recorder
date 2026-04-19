@@ -156,6 +156,7 @@ jobs:
           restore-keys: state-${{ matrix.channel.username }}-
       
       - name: Record
+        id: record
         env:
           COOKIES: ${{ secrets.CHATURBATE_COOKIES }}
           USER_AGENT: ${{ secrets.USER_AGENT }}
@@ -188,7 +189,7 @@ jobs:
           # Debug: Verify settings.json was created properly
           echo "Settings file created, size: $(wc -c < conf/settings.json) bytes"
           
-          # Run with timeout and proper error handling
+          # Save PID for cleanup
           timeout 5h ./goondvr \
             -u "${{ matrix.channel.username }}" \
             --site "${{ matrix.channel.site }}" \
@@ -198,11 +199,48 @@ jobs:
             -max-duration 240 \
             -max-filesize 0 \
             --enable-gofile-upload \
-            --debug || {
-              echo "Recording ended with code $?"
-              echo "This is normal - streamer may be offline or timeout reached"
-              exit 0
-            }
+            --debug &
+          
+          GOONDVR_PID=$!
+          echo "GOONDVR_PID=$GOONDVR_PID" >> $GITHUB_ENV
+          echo "Recording started with PID: $GOONDVR_PID"
+          
+          # Wait for the process or timeout
+          wait $GOONDVR_PID || {
+            EXIT_CODE=$?
+            echo "Recording ended with code $EXIT_CODE"
+            echo "This is normal - streamer may be offline or timeout reached"
+          }
+      
+      - name: Cleanup and finalize recordings
+        if: always()
+        run: |
+          echo "=== Cleanup Started ==="
+          
+          # If goondvr is still running, send SIGTERM for graceful shutdown
+          if [ ! -z "$GOONDVR_PID" ] && kill -0 $GOONDVR_PID 2>/dev/null; then
+            echo "Sending graceful shutdown signal to goondvr (PID: $GOONDVR_PID)..."
+            kill -TERM $GOONDVR_PID
+            
+            # Wait up to 10 minutes for finalization
+            echo "Waiting for recordings to finalize (max 10 minutes)..."
+            for i in {1..600}; do
+              if ! kill -0 $GOONDVR_PID 2>/dev/null; then
+                echo "Finalization complete!"
+                break
+              fi
+              if [ $((i % 30)) -eq 0 ]; then
+                echo "Still finalizing... ($i seconds elapsed)"
+              fi
+              sleep 1
+            done
+            
+            # Force kill if still running
+            if kill -0 $GOONDVR_PID 2>/dev/null; then
+              echo "Force killing after timeout..."
+              kill -9 $GOONDVR_PID 2>/dev/null || true
+            fi
+          fi
           
           # Show upload summary
           echo "=== Upload Summary ==="
