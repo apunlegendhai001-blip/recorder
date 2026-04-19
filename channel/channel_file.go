@@ -97,7 +97,8 @@ func (ch *Channel) cleanupLocked() error {
 		go ch.ScanTotalDiskUsage()
 	} else if fileInfo != nil {
 		ch.startFinalization()
-		go ch.finalizeRecording(filename)
+		// Process in background - don't block recording
+		go ch.finalizeRecordingAsync(filename)
 	}
 
 	return nil
@@ -402,6 +403,155 @@ func (ch *Channel) finalizeRecording(filename string) {
 		}
 	}
 
+	completedDir := completedDirForChannel(ch)
+	if completedDir != "" {
+		dst, err := moveRecordingToDir(finalPath, recordingDirFromPattern(ch.Config.Pattern), completedDir)
+		if err != nil {
+			ch.Error("move completed recording `%s`: %s", finalPath, err.Error())
+		} else {
+			ch.Info("completed recording moved to `%s`", dst)
+		}
+	}
+
+	go ch.ScanTotalDiskUsage()
+}
+
+// finalizeRecordingAsync processes a completed recording file in the background
+// This allows recording to continue while conversion and upload happen in parallel
+func (ch *Channel) finalizeRecordingAsync(filename string) {
+	defer ch.finishFinalization()
+	
+	ch.Info("starting background processing for `%s`", filepath.Base(filename))
+
+	finalPath := filename
+	
+	// Step 1: Convert/remux if needed (runs in parallel with recording)
+	if server.Config.FinalizeMode != "none" {
+		ch.Info("converting `%s` to %s...", filepath.Base(filename), finalOutputExt(filename))
+		processedPath, err := ch.runFFmpegFinalizer(filename)
+		if err != nil {
+			ch.Error("ffmpeg %s failed for `%s`: %s", server.Config.FinalizeMode, filename, err.Error())
+			ch.Info("keeping original recording because finalization failed")
+		} else {
+			ch.Info("conversion complete: `%s`", filepath.Base(processedPath))
+			if processedPath != filename {
+				if err := os.Remove(filename); err != nil {
+					ch.Error("remove original after ffmpeg finalization `%s`: %s", filename, err.Error())
+				} else {
+					ch.Info("removed original .ts file")
+				}
+			}
+			finalPath = processedPath
+		}
+	} else if strings.HasSuffix(filename, ".mp4") {
+		if err := chaturbate.BuildSeekIndex(filename); err != nil {
+			log.Printf("WARN  seek index %s: %v", filename, err)
+		}
+	}
+
+	// Step 2: Upload to GoFile if enabled (runs in parallel with recording)
+	if server.Config.EnableGoFileUpload {
+		ch.Info("uploading `%s` to GoFile...", filepath.Base(finalPath))
+		
+		gofileUploader := uploader.NewGoFileUploader()
+		uploadStart := time.Now()
+		downloadLink, err := gofileUploader.Upload(finalPath)
+		uploadDuration := time.Since(uploadStart).Seconds()
+		
+		if err != nil {
+			ch.Error("gofile upload failed for `%s`: %s", finalPath, err.Error())
+			ch.Info("keeping local file because upload failed")
+			
+			// Log failed upload to database
+			db := database.GetDB()
+			fileInfo, _ := os.Stat(finalPath)
+			filesize := int64(0)
+			if fileInfo != nil {
+				filesize = fileInfo.Size()
+			}
+			
+			_ = db.AddRecord(database.VideoRecord{
+				ID:             fmt.Sprintf("%s_%d", ch.Config.Username, time.Now().Unix()),
+				Username:       ch.Config.Username,
+				Site:           ch.Config.Site,
+				ChannelID:      fmt.Sprintf("%s__%s", ch.Config.Site, ch.Config.Username),
+				Filename:       filepath.Base(finalPath),
+				OriginalPath:   finalPath,
+				UploadedAt:     time.Now(),
+				RecordedAt:     time.Unix(ch.StreamedAt, 0),
+				GoFileLink:     "",
+				Duration:       ch.Duration,
+				FilesizeBytes:  filesize,
+				Resolution:     ch.Config.Resolution,
+				Framerate:      ch.Config.Framerate,
+				RoomTitle:      ch.RoomTitle,
+				Gender:         ch.Gender,
+				UploadDuration: uploadDuration,
+				UploadSpeed:    0,
+				Status:         "failed",
+				ErrorMessage:   err.Error(),
+			})
+		} else {
+			ch.Info("upload successful: %s", downloadLink)
+			
+			// Get file info for database record
+			fileInfo, _ := os.Stat(finalPath)
+			filesize := int64(0)
+			uploadSpeed := 0.0
+			if fileInfo != nil {
+				filesize = fileInfo.Size()
+				if uploadDuration > 0 {
+					uploadSpeed = float64(filesize) / uploadDuration / 1024 / 1024 // MB/s
+				}
+			}
+			
+			// Store in database
+			db := database.GetDB()
+			record := database.VideoRecord{
+				ID:             fmt.Sprintf("%s_%d", ch.Config.Username, time.Now().Unix()),
+				Username:       ch.Config.Username,
+				Site:           ch.Config.Site,
+				ChannelID:      fmt.Sprintf("%s__%s", ch.Config.Site, ch.Config.Username),
+				Filename:       filepath.Base(finalPath),
+				OriginalPath:   finalPath,
+				UploadedAt:     time.Now(),
+				RecordedAt:     time.Unix(ch.StreamedAt, 0),
+				GoFileLink:     downloadLink,
+				Duration:       ch.Duration,
+				FilesizeBytes:  filesize,
+				Resolution:     ch.Config.Resolution,
+				Framerate:      ch.Config.Framerate,
+				RoomTitle:      ch.RoomTitle,
+				Gender:         ch.Gender,
+				UploadDuration: uploadDuration,
+				UploadSpeed:    uploadSpeed,
+				Status:         "uploaded",
+			}
+			
+			if err := db.AddRecord(record); err != nil {
+				ch.Error("failed to save record to database: %s", err.Error())
+			} else {
+				ch.Info("video record saved to database")
+				// Create backup every 10 uploads
+				if len(db.GetRecords()) % 10 == 0 {
+					_ = db.Backup()
+				}
+			}
+			
+			// Step 3: Delete local file after successful upload
+			ch.Info("deleting local file `%s`...", filepath.Base(finalPath))
+			if err := os.Remove(finalPath); err != nil {
+				ch.Error("failed to delete local file `%s`: %s", finalPath, err.Error())
+			} else {
+				ch.Info("local file deleted successfully")
+			}
+			
+			go ch.ScanTotalDiskUsage()
+			return
+		}
+	}
+
+	// If upload is disabled, move to completed directory
 	completedDir := completedDirForChannel(ch)
 	if completedDir != "" {
 		dst, err := moveRecordingToDir(finalPath, recordingDirFromPattern(ch.Config.Pattern), completedDir)
