@@ -14,6 +14,55 @@ on:
   schedule:
     - cron: '0 */5 * * *'
   workflow_dispatch:
+    inputs:
+      max_duration:
+        description: 'Recording chunk duration (minutes)'
+        required: false
+        default: '45'
+        type: choice
+        options:
+          - '15'
+          - '30'
+          - '45'
+          - '60'
+          - '90'
+          - '120'
+          - '180'
+          - '240'
+      resolution:
+        description: 'Target resolution (0 = source quality)'
+        required: false
+        default: '9999'
+        type: choice
+        options:
+          - '9999'
+          - '1080'
+          - '720'
+          - '480'
+      framerate:
+        description: 'Target framerate (0 = source framerate)'
+        required: false
+        default: '60'
+        type: choice
+        options:
+          - '60'
+          - '30'
+          - '24'
+      interval:
+        description: 'Check interval when offline (minutes)'
+        required: false
+        default: '1'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '5'
+          - '10'
+      debug:
+        description: 'Enable debug logging'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   # Release job - only runs on tags
@@ -299,17 +348,31 @@ jobs:
           ) &
           UPLOADER_PID=$!
           
-          # Record without conversion/upload - just save .ts files
-          # 45-minute chunks to stay well under artifact size limits
+          # Set recording parameters (use workflow inputs if provided, otherwise defaults)
+          MAX_DURATION="${{ inputs.max_duration || '45' }}"
+          RESOLUTION="${{ inputs.resolution || '9999' }}"
+          FRAMERATE="${{ inputs.framerate || '60' }}"
+          INTERVAL="${{ inputs.interval || '1' }}"
+          DEBUG_FLAG="${{ inputs.debug == true && '--debug' || '' }}"
+          
+          echo "=== Recording Parameters ==="
+          echo "Max duration: ${MAX_DURATION} minutes"
+          echo "Resolution: ${RESOLUTION}p"
+          echo "Framerate: ${FRAMERATE}fps"
+          echo "Check interval: ${INTERVAL} minute(s)"
+          echo "Debug: ${{ inputs.debug || false }}"
+          echo "============================"
+          
+          # Record without conversion/upload - just save video files
           timeout 5h ./goondvr \
             -u "${{ matrix.channel.username }}" \
             --site "${{ matrix.channel.site }}" \
-            -resolution 9999 \
-            -framerate 60 \
-            -interval 1 \
-            -max-duration 45 \
+            -resolution "$RESOLUTION" \
+            -framerate "$FRAMERATE" \
+            -interval "$INTERVAL" \
+            -max-duration "$MAX_DURATION" \
             -max-filesize 0 \
-            --debug || {
+            $DEBUG_FLAG || {
               EXIT_CODE=$?
               echo "Recording ended with code $EXIT_CODE"
               if [ $EXIT_CODE -eq 124 ]; then
