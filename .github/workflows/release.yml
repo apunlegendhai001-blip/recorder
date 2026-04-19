@@ -301,7 +301,7 @@ jobs:
 
   # Dedicated job for processing: convert, upload, delete
   process:
-    if: "!startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true'"
+    if: "!startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true' && always()"
     needs: [setup, record]
     runs-on: ubuntu-latest
     timeout-minutes: 360
