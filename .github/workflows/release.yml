@@ -212,6 +212,11 @@ jobs:
             while true; do
               sleep 60  # Check every minute
               
+              # Show current recording status
+              echo "=== Recording Status ($(date)) ==="
+              find videos -type f -name "*.ts" -exec ls -lh {} \; 2>/dev/null || echo "No files yet"
+              echo "================================"
+              
               # Find .ts files that haven't been uploaded yet
               for TS_FILE in videos/**/*.ts; do
                 if [ -f "$TS_FILE" ]; then
