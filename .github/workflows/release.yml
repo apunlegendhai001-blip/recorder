@@ -260,7 +260,14 @@ jobs:
           
           # List completed recordings
           echo "=== Completed Recordings ==="
-          find videos -type f -name "*.ts" -exec ls -lh {} \;
+          echo "Videos directory contents:"
+          ls -laR videos/ 2>/dev/null || echo "Videos directory not found or empty"
+          echo ""
+          echo "All .ts files:"
+          find videos -type f -name "*.ts" -exec ls -lh {} \; 2>/dev/null || echo "No .ts files found"
+          echo ""
+          echo "All .uploaded markers:"
+          find videos -type f -name "*.uploaded" -exec ls -lh {} \; 2>/dev/null || echo "No .uploaded markers found"
           echo "======================"
       
       - name: Upload raw recordings for processing

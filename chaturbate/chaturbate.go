@@ -103,11 +103,32 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 				fmt.Printf("[DEBUG] Cloudflare block detected, trying FlareSolverr scraping...\n")
 			}
 			
-			// Try scraping the public page
-			hlsURL, status, scrapeErr := internal.ScrapeChaturbateStreamWithFlareSolverr(ctx, username)
+			// Try scraping the public page with retries
+			var hlsURL, status string
+			var scrapeErr error
+			
+			for attempt := 1; attempt <= 2; attempt++ {
+				if server.Config.Debug {
+					fmt.Printf("[DEBUG] FlareSolverr attempt %d/2...\n", attempt)
+				}
+				
+				hlsURL, status, scrapeErr = internal.ScrapeChaturbateStreamWithFlareSolverr(ctx, username)
+				if scrapeErr == nil {
+					break
+				}
+				
+				if server.Config.Debug {
+					fmt.Printf("[DEBUG] FlareSolverr attempt %d failed: %v\n", attempt, scrapeErr)
+				}
+				
+				if attempt < 2 {
+					time.Sleep(5 * time.Second)
+				}
+			}
+			
 			if scrapeErr != nil {
 				if server.Config.Debug {
-					fmt.Printf("[DEBUG] FlareSolverr scraping failed: %v\n", scrapeErr)
+					fmt.Printf("[DEBUG] All FlareSolverr attempts failed, returning Cloudflare error\n")
 				}
 				return nil, fmt.Errorf("failed to get stream info: %w", err)
 			}

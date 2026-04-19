@@ -5,10 +5,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/HeapOfChaos/goondvr/server"
 )
+
+// unescapeUnicode converts \uXXXX sequences to actual characters
+func unescapeUnicode(s string) string {
+	re := regexp.MustCompile(`\\u([0-9a-fA-F]{4})`)
+	return re.ReplaceAllStringFunc(s, func(match string) string {
+		hex := match[2:] // Remove \u prefix
+		code, err := strconv.ParseInt(hex, 16, 32)
+		if err != nil {
+			return match
+		}
+		return string(rune(code))
+	})
+}
 
 // ScrapeChaturbateStream scrapes the public Chaturbate page to get stream info
 // This works without authentication and bypasses Cloudflare using FlareSolverr
@@ -121,12 +135,16 @@ func ScrapeChaturbateStreamWithFlareSolverr(ctx context.Context, username string
 		matches := regex.FindStringSubmatch(body)
 		if len(matches) > 1 {
 			hlsURL := strings.ReplaceAll(matches[1], `\/`, `/`)
+			// Unescape unicode characters like \u002D
+			hlsURL = unescapeUnicode(hlsURL)
 			if server.Config.Debug {
 				fmt.Printf("[DEBUG] Found HLS URL with pattern %s: %s\n", pattern, hlsURL)
 			}
 			return hlsURL, "public", nil
 		} else if len(matches) > 0 {
 			hlsURL := matches[0]
+			// Unescape unicode characters
+			hlsURL = unescapeUnicode(hlsURL)
 			if server.Config.Debug {
 				fmt.Printf("[DEBUG] Found HLS URL: %s\n", hlsURL)
 			}
