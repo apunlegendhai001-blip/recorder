@@ -218,7 +218,7 @@ jobs:
               echo "================================"
               
               # Find .ts files that haven't been uploaded yet
-              for TS_FILE in videos/**/*.ts; do
+              find videos -type f -name "*.ts" 2>/dev/null | while read TS_FILE; do
                 if [ -f "$TS_FILE" ]; then
                   # Check if file is still being written (size changing)
                   SIZE1=$(stat -c%s "$TS_FILE" 2>/dev/null || stat -f%z "$TS_FILE" 2>/dev/null)
@@ -257,9 +257,10 @@ jobs:
           kill $UPLOADER_PID 2>/dev/null || true
           
           # Mark any remaining files as complete
-          for TS_FILE in videos/**/*.ts; do
+          find videos -type f -name "*.ts" 2>/dev/null | while read TS_FILE; do
             if [ -f "$TS_FILE" ]; then
               touch "${TS_FILE}.uploaded"
+              echo "Marked: $(basename "$TS_FILE")"
             fi
           done
           
