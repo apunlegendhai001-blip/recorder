@@ -101,7 +101,7 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 	}
 	
 	if server.Config.Debug {
-		fmt.Printf("[DEBUG] API response body (first 500 chars): %s\n", body[:min(500, len(body))])
+		fmt.Printf("[DEBUG] API response body: %s\n", body)
 	}
 
 	var resp apiResponse
@@ -110,7 +110,8 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 	}
 
 	if server.Config.Debug {
-		fmt.Printf("[DEBUG] API response for %s: room_status=%s url=%v success=%v\n", username, resp.RoomStatus, resp.URL != "", resp.Success)
+		fmt.Printf("[DEBUG] Parsed response - success=%v, url_present=%v, room_status=%s\n", 
+			resp.Success, resp.URL != "", resp.RoomStatus)
 	}
 
 	// Always populate static metadata so the caller can update it even when offline.
@@ -121,12 +122,19 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 		SummaryCardImage: resp.SummaryCardImage,
 	}
 
-	if resp.Success && resp.URL != "" {
+	// If we have a URL, the stream is accessible regardless of room_status
+	if resp.URL != "" {
 		meta.HLSSource = resp.URL
 		meta.NumViewers = resp.NumViewers
 		return meta, nil
 	}
 
+	// If success is true but no URL, might be offline
+	if resp.Success {
+		return meta, internal.ErrChannelOffline
+	}
+
+	// Check room status only if no URL and not successful
 	switch resp.RoomStatus {
 	case "private":
 		return meta, internal.ErrPrivateStream

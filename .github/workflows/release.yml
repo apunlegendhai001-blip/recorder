@@ -152,16 +152,22 @@ jobs:
         run: |
           mkdir -p videos conf database/backups
           
-          # Handle missing secrets gracefully
-          COOKIE_ARG=""
-          if [ -n "$COOKIES" ]; then
-            COOKIE_ARG="-cookies \"$COOKIES\""
-          fi
+          # Create settings.json with cookies and user agent
+          cat > conf/settings.json << 'EOF'
+          {
+            "cookies": "$COOKIES",
+            "user_agent": "$USER_AGENT",
+            "finalize_mode": "remux",
+            "ffmpeg_encoder": "libx264",
+            "ffmpeg_container": "mp4",
+            "ffmpeg_quality": 23,
+            "ffmpeg_preset": "medium"
+          }
+          EOF
           
-          USER_AGENT_ARG=""
-          if [ -n "$USER_AGENT" ]; then
-            USER_AGENT_ARG="-user-agent \"$USER_AGENT\""
-          fi
+          # Replace environment variables in settings.json
+          sed -i "s|\$COOKIES|$COOKIES|g" conf/settings.json
+          sed -i "s|\$USER_AGENT|$USER_AGENT|g" conf/settings.json
           
           # Run with timeout and proper error handling
           timeout 5h ./goondvr \
@@ -170,14 +176,14 @@ jobs:
             -resolution 9999 \
             -framerate 60 \
             -interval 1 \
-            -max-duration 0 \
+            -max-duration 240 \
             -max-filesize 0 \
             --enable-gofile-upload \
-            --finalize-mode remux \
-            --ffmpeg-container mp4 \
-            $COOKIE_ARG \
-            $USER_AGENT_ARG || {
+            --debug || {
               echo "Recording ended with code $?"
+              echo "This is normal - streamer may be offline or timeout reached"
+              exit 0
+            }
               echo "This is normal - streamer may be offline or timeout reached"
               exit 0
             }
