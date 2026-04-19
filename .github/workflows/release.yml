@@ -186,7 +186,7 @@ jobs:
           mkdir -p videos conf database/backups processing-queue
           
           # Check for resumed recordings
-          EXISTING_FILES=$(find videos -type f -name "*.ts" 2>/dev/null | wc -l || echo "0")
+          EXISTING_FILES=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l || echo "0")
           if [ "$EXISTING_FILES" -gt 0 ]; then
             echo "=== Resume Detected ==="
             echo "Found $EXISTING_FILES existing recording(s) from previous run"
@@ -235,6 +235,8 @@ jobs:
               cookies: $cookies,
               user_agent: $ua,
               finalize_mode: "none",
+              enable_gofile_upload: false,
+              completed_dir: "",
               ffmpeg_encoder: "libx264",
               ffmpeg_container: "mp4",
               ffmpeg_quality: 23,
@@ -272,23 +274,23 @@ jobs:
                 break
               fi
               
-              # Find .ts files that haven't been uploaded yet
-              find videos -type f -name "*.ts" 2>/dev/null | while read TS_FILE; do
-                if [ -f "$TS_FILE" ]; then
+              # Find .ts and .mp4 files that haven't been uploaded yet
+              find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | while read VIDEO_FILE; do
+                if [ -f "$VIDEO_FILE" ]; then
                   # Skip if already marked
-                  MARKER="${TS_FILE}.uploaded"
+                  MARKER="${VIDEO_FILE}.uploaded"
                   if [ -f "$MARKER" ]; then
                     continue
                   fi
                   
                   # Check if file is still being written (size changing)
-                  SIZE1=$(stat -c%s "$TS_FILE" 2>/dev/null || stat -f%z "$TS_FILE" 2>/dev/null || echo "0")
+                  SIZE1=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || stat -f%z "$VIDEO_FILE" 2>/dev/null || echo "0")
                   sleep 2
-                  SIZE2=$(stat -c%s "$TS_FILE" 2>/dev/null || stat -f%z "$TS_FILE" 2>/dev/null || echo "0")
+                  SIZE2=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || stat -f%z "$VIDEO_FILE" 2>/dev/null || echo "0")
                   
                   # If size is stable and non-zero, file is complete
                   if [ "$SIZE1" = "$SIZE2" ] && [ "$SIZE1" -gt 0 ]; then
-                    echo "Marking completed file for upload: $(basename "$TS_FILE") (${SIZE1} bytes)"
+                    echo "Marking completed file for upload: $(basename "$VIDEO_FILE") (${SIZE1} bytes)"
                     touch "$MARKER"
                   fi
                 fi
@@ -321,15 +323,15 @@ jobs:
           kill $UPLOADER_PID 2>/dev/null || true
           
           # Mark any remaining files as complete (only if non-empty)
-          find videos -type f -name "*.ts" 2>/dev/null | while read TS_FILE; do
-            if [ -f "$TS_FILE" ]; then
-              FILE_SIZE=$(stat -c%s "$TS_FILE" 2>/dev/null || stat -f%z "$TS_FILE" 2>/dev/null || echo "0")
+          find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | while read VIDEO_FILE; do
+            if [ -f "$VIDEO_FILE" ]; then
+              FILE_SIZE=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || stat -f%z "$VIDEO_FILE" 2>/dev/null || echo "0")
               if [ "$FILE_SIZE" -gt 0 ]; then
-                touch "${TS_FILE}.uploaded"
-                echo "Marked: $(basename "$TS_FILE") (${FILE_SIZE} bytes)"
+                touch "${VIDEO_FILE}.uploaded"
+                echo "Marked: $(basename "$VIDEO_FILE") (${FILE_SIZE} bytes)"
               else
-                echo "Skipping empty file: $(basename "$TS_FILE")"
-                rm -f "$TS_FILE"
+                echo "Skipping empty file: $(basename "$VIDEO_FILE")"
+                rm -f "$VIDEO_FILE"
               fi
             fi
           done
@@ -339,8 +341,8 @@ jobs:
           echo "Videos directory contents:"
           ls -laR videos/ 2>/dev/null || echo "Videos directory not found or empty"
           echo ""
-          echo "All .ts files:"
-          find videos -type f -name "*.ts" -exec ls -lh {} \; 2>/dev/null || echo "No .ts files found"
+          echo "All video files:"
+          find videos -type f \( -name "*.ts" -o -name "*.mp4" \) -exec ls -lh {} \; 2>/dev/null || echo "No video files found"
           echo ""
           echo "All .uploaded markers:"
           find videos -type f -name "*.uploaded" -exec ls -lh {} \; 2>/dev/null || echo "No .uploaded markers found"
@@ -381,6 +383,7 @@ jobs:
           name: raw-videos-${{ matrix.channel.username }}-${{ github.run_number }}
           path: |
             videos/**/*.ts
+            videos/**/*.mp4
             videos/**/*.uploaded
           retention-days: 1
           if-no-files-found: ignore
@@ -400,8 +403,8 @@ jobs:
               break
             fi
             
-            # Find and delete oldest .ts file
-            OLDEST=$(find videos -type f -name "*.ts" -printf '%T+ %p\n' 2>/dev/null | sort | head -1 | cut -d' ' -f2-)
+            # Find and delete oldest video file
+            OLDEST=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) -printf '%T+ %p\n' 2>/dev/null | sort | head -1 | cut -d' ' -f2-)
             if [ -z "$OLDEST" ]; then
               break
             fi
@@ -506,24 +509,26 @@ jobs:
           
           # Process each completed file
           for MARKER in $COMPLETED_FILES; do
-            TS_FILE="${MARKER%.uploaded}"
+            VIDEO_FILE="${MARKER%.uploaded}"
             
-            if [ ! -f "$TS_FILE" ]; then
-              echo "Warning: Marker found but file missing: $TS_FILE"
+            if [ ! -f "$VIDEO_FILE" ]; then
+              echo "Warning: Marker found but file missing: $VIDEO_FILE"
               rm -f "$MARKER"
               continue
             fi
             
             # Skip empty or corrupted files
-            TS_SIZE_BYTES=$(stat -c%s "$TS_FILE" 2>/dev/null || stat -f%z "$TS_FILE" 2>/dev/null || echo "0")
-            if [ "$TS_SIZE_BYTES" -lt 1024 ]; then
-              echo "Warning: File too small or empty: $TS_FILE (${TS_SIZE_BYTES} bytes)"
-              rm -f "$TS_FILE" "$MARKER"
+            VIDEO_SIZE_BYTES=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || stat -f%z "$VIDEO_FILE" 2>/dev/null || echo "0")
+            if [ "$VIDEO_SIZE_BYTES" -lt 1024 ]; then
+              echo "Warning: File too small or empty: $VIDEO_FILE (${VIDEO_SIZE_BYTES} bytes)"
+              rm -f "$VIDEO_FILE" "$MARKER"
               continue
             fi
             
-            BASENAME=$(basename "$TS_FILE" .ts)
-            MP4_FILE="processed/${BASENAME}.mp4"
+            BASENAME=$(basename "$VIDEO_FILE")
+            FILE_EXT="${BASENAME##*.}"
+            BASENAME_NO_EXT="${BASENAME%.*}"
+            MP4_FILE="processed/${BASENAME_NO_EXT}.mp4"
             
             echo ""
             echo "=== Processing: $BASENAME ==="
@@ -535,17 +540,30 @@ jobs:
               continue
             fi
             
-            TS_SIZE=$(du -h "$TS_FILE" | cut -f1)
-            echo "Input: $TS_FILE ($TS_SIZE)"
+            VIDEO_SIZE=$(du -h "$VIDEO_FILE" | cut -f1)
+            echo "Input: $VIDEO_FILE ($VIDEO_SIZE)"
             
-            # Step 1: Convert to MP4
-            echo "Converting to MP4..."
-            CONVERT_START=$(date +%s)
-            if timeout 30m ffmpeg -nostdin -y -i "$TS_FILE" -c copy -movflags +faststart "$MP4_FILE" 2>&1 | tail -20; then
-              CONVERT_END=$(date +%s)
-              CONVERT_DURATION=$((CONVERT_END - CONVERT_START))
-              MP4_SIZE=$(du -h "$MP4_FILE" | cut -f1)
-              echo "✓ Conversion successful: $MP4_FILE ($MP4_SIZE) in ${CONVERT_DURATION}s"
+            # Step 1: Convert to MP4 if needed (skip if already MP4)
+            if [ "$FILE_EXT" = "mp4" ]; then
+              echo "File is already MP4, skipping conversion"
+              MP4_FILE="$VIDEO_FILE"
+              CONVERT_DURATION=0
+            else
+              echo "Converting to MP4..."
+              CONVERT_START=$(date +%s)
+              if timeout 30m ffmpeg -nostdin -y -i "$VIDEO_FILE" -c copy -movflags +faststart "$MP4_FILE" 2>&1 | tail -20; then
+                CONVERT_END=$(date +%s)
+                CONVERT_DURATION=$((CONVERT_END - CONVERT_START))
+                MP4_SIZE=$(du -h "$MP4_FILE" | cut -f1)
+                echo "✓ Conversion successful: $MP4_FILE ($MP4_SIZE) in ${CONVERT_DURATION}s"
+              else
+                echo "✗ Conversion failed or timed out"
+                FAILED_COUNT=$((FAILED_COUNT + 1))
+                # Remove marker so it can be retried
+                rm -f "$MARKER"
+                continue
+              fi
+            fi
               
               # Verify MP4 was created successfully
               if [ ! -f "$MP4_FILE" ]; then
@@ -668,7 +686,7 @@ jobs:
                     
                     # Step 3: Delete local files
                     echo "Deleting local files..."
-                    rm -f "$TS_FILE" "$MP4_FILE" "$MARKER"
+                    rm -f "$VIDEO_FILE" "$MP4_FILE" "$MARKER"
                     echo "✓ Local files deleted"
                     
                     PROCESSED_COUNT=$((PROCESSED_COUNT + 1))
@@ -689,11 +707,6 @@ jobs:
                 FAILED_COUNT=$((FAILED_COUNT + 1))
                 # Keep files for retry in next run
               fi
-            else
-              echo "✗ Conversion failed or timed out"
-              FAILED_COUNT=$((FAILED_COUNT + 1))
-              # Remove marker so it can be retried
-              rm -f "$MARKER"
             fi
           done
           
