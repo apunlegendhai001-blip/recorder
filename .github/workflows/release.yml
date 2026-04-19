@@ -207,6 +207,33 @@ jobs:
           # Debug: Verify settings.json was created properly
           echo "Settings file created, size: $(wc -c < conf/settings.json) bytes"
           
+          # Start background uploader that monitors for completed .ts files
+          (
+            while true; do
+              sleep 60  # Check every minute
+              
+              # Find .ts files that haven't been uploaded yet
+              for TS_FILE in videos/**/*.ts; do
+                if [ -f "$TS_FILE" ]; then
+                  # Check if file is still being written (size changing)
+                  SIZE1=$(stat -c%s "$TS_FILE" 2>/dev/null || stat -f%z "$TS_FILE" 2>/dev/null)
+                  sleep 2
+                  SIZE2=$(stat -c%s "$TS_FILE" 2>/dev/null || stat -f%z "$TS_FILE" 2>/dev/null)
+                  
+                  # If size is stable, file is complete
+                  if [ "$SIZE1" = "$SIZE2" ]; then
+                    MARKER="${TS_FILE}.uploaded"
+                    if [ ! -f "$MARKER" ]; then
+                      echo "Marking completed file for upload: $(basename "$TS_FILE")"
+                      touch "$MARKER"
+                    fi
+                  fi
+                fi
+              done
+            done
+          ) &
+          UPLOADER_PID=$!
+          
           # Record without conversion/upload - just save .ts files
           timeout 5h ./goondvr \
             -u "${{ matrix.channel.username }}" \
@@ -221,6 +248,16 @@ jobs:
               echo "This is normal - streamer may be offline or timeout reached"
             }
           
+          # Stop the background uploader
+          kill $UPLOADER_PID 2>/dev/null || true
+          
+          # Mark any remaining files as complete
+          for TS_FILE in videos/**/*.ts; do
+            if [ -f "$TS_FILE" ]; then
+              touch "${TS_FILE}.uploaded"
+            fi
+          done
+          
           # List completed recordings
           echo "=== Completed Recordings ==="
           find videos -type f -name "*.ts" -exec ls -lh {} \;
@@ -231,7 +268,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: raw-videos-${{ matrix.channel.username }}-${{ github.run_number }}
-          path: videos/**/*.ts
+          path: |
+            videos/**/*.ts
+            videos/**/*.uploaded
           retention-days: 1
           if-no-files-found: ignore
           compression-level: 0
@@ -291,20 +330,27 @@ jobs:
           mkdir -p database/backups processed
           
           echo "=== Processing Job Started ==="
-          echo "Looking for .ts files to process..."
+          echo "Looking for completed .ts files to process..."
           
-          # Find all .ts files
-          TS_FILES=$(find videos -type f -name "*.ts" 2>/dev/null || true)
+          # Find all .ts files that have .uploaded marker
+          COMPLETED_FILES=$(find videos -type f -name "*.uploaded" 2>/dev/null || true)
           
-          if [ -z "$TS_FILES" ]; then
-            echo "No .ts files found to process"
+          if [ -z "$COMPLETED_FILES" ]; then
+            echo "No completed files found to process"
             exit 0
           fi
           
-          echo "Found $(echo "$TS_FILES" | wc -l) file(s) to process"
+          echo "Found $(echo "$COMPLETED_FILES" | wc -l) completed file(s) to process"
           
-          # Process each file
-          for TS_FILE in $TS_FILES; do
+          # Process each completed file
+          for MARKER in $COMPLETED_FILES; do
+            TS_FILE="${MARKER%.uploaded}"
+            
+            if [ ! -f "$TS_FILE" ]; then
+              echo "Warning: Marker found but file missing: $TS_FILE"
+              continue
+            fi
+            
             BASENAME=$(basename "$TS_FILE" .ts)
             MP4_FILE="processed/${BASENAME}.mp4"
             
