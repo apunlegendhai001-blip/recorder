@@ -284,9 +284,9 @@ jobs:
                   fi
                   
                   # Check if file is still being written (size changing)
-                  SIZE1=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || stat -f%z "$VIDEO_FILE" 2>/dev/null || echo "0")
+                  SIZE1=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || echo "0")
                   sleep 2
-                  SIZE2=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || stat -f%z "$VIDEO_FILE" 2>/dev/null || echo "0")
+                  SIZE2=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || echo "0")
                   
                   # If size is stable and non-zero, file is complete
                   if [ "$SIZE1" = "$SIZE2" ] && [ "$SIZE1" -gt 0 ]; then
@@ -325,7 +325,7 @@ jobs:
           # Mark any remaining files as complete (only if non-empty)
           find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | while read VIDEO_FILE; do
             if [ -f "$VIDEO_FILE" ]; then
-              FILE_SIZE=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || stat -f%z "$VIDEO_FILE" 2>/dev/null || echo "0")
+              FILE_SIZE=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || echo "0")
               if [ "$FILE_SIZE" -gt 0 ]; then
                 touch "${VIDEO_FILE}.uploaded"
                 echo "Marked: $(basename "$VIDEO_FILE") (${FILE_SIZE} bytes)"
@@ -463,6 +463,23 @@ jobs:
           path: videos/
           merge-multiple: true
       
+      - name: Verify artifact structure
+        run: |
+          echo "=== Artifact Download Verification ==="
+          if [ -d videos ]; then
+            echo "Videos directory structure:"
+            find videos -type f \( -name "*.ts" -o -name "*.mp4" -o -name "*.uploaded" \) | head -20
+            
+            VIDEO_COUNT=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l || echo "0")
+            MARKER_COUNT=$(find videos -type f -name "*.uploaded" 2>/dev/null | wc -l || echo "0")
+            
+            echo "Found $VIDEO_COUNT video file(s)"
+            echo "Found $MARKER_COUNT marker(s)"
+          else
+            echo "No videos directory found"
+          fi
+          echo "===================================="
+      
       - name: Restore database
         uses: actions/cache/restore@v4
         continue-on-error: true
@@ -487,13 +504,29 @@ jobs:
             echo "⚠️  WARNING: Low disk space for processing (${AVAILABLE_GB}GB)"
           fi
           
-          echo "Looking for completed .ts files to process..."
+          echo "Looking for completed video files to process..."
           
-          # Find all .ts files that have .uploaded marker (limit to 50 per run for safety)
+          # Find all video files that have .uploaded marker (limit to 50 per run for safety)
           COMPLETED_FILES=$(find videos -type f -name "*.uploaded" 2>/dev/null | sort | head -50 || true)
           
           if [ -z "$COMPLETED_FILES" ]; then
             echo "No completed files found to process"
+            echo ""
+            echo "Debug: Checking videos directory..."
+            if [ -d videos ]; then
+              echo "Videos directory exists"
+              ALL_VIDEOS=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l || echo "0")
+              ALL_MARKERS=$(find videos -type f -name "*.uploaded" 2>/dev/null | wc -l || echo "0")
+              echo "Total video files: $ALL_VIDEOS"
+              echo "Total markers: $ALL_MARKERS"
+              
+              if [ "$ALL_VIDEOS" -gt 0 ] && [ "$ALL_MARKERS" -eq 0 ]; then
+                echo "⚠️  WARNING: Found video files but no markers!"
+                echo "This might indicate the recording job didn't complete properly."
+              fi
+            else
+              echo "Videos directory does not exist"
+            fi
             exit 0
           fi
           
@@ -521,7 +554,7 @@ jobs:
             fi
             
             # Skip empty or corrupted files
-            VIDEO_SIZE_BYTES=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || stat -f%z "$VIDEO_FILE" 2>/dev/null || echo "0")
+            VIDEO_SIZE_BYTES=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || echo "0")
             if [ "$VIDEO_SIZE_BYTES" -lt 1024 ]; then
               echo "Warning: File too small or empty: $VIDEO_FILE (${VIDEO_SIZE_BYTES} bytes)"
               rm -f "$VIDEO_FILE" "$MARKER"
@@ -577,7 +610,7 @@ jobs:
               fi
               
               # Check MP4 file size before upload
-              MP4_SIZE_BYTES=$(stat -c%s "$MP4_FILE" 2>/dev/null || stat -f%z "$MP4_FILE" 2>/dev/null || echo "0")
+              MP4_SIZE_BYTES=$(stat -c%s "$MP4_FILE" 2>/dev/null || echo "0")
               
               if [ "$MP4_SIZE_BYTES" -lt 1024 ]; then
                 echo "✗ MP4 file is empty or corrupted"
@@ -654,7 +687,7 @@ jobs:
                     echo "  Duration: ${UPLOAD_DURATION}s"
                     
                     # Calculate upload speed
-                    FILESIZE=$(stat -f%z "$MP4_FILE" 2>/dev/null || stat -c%s "$MP4_FILE" 2>/dev/null || echo "0")
+                    FILESIZE=$(stat -c%s "$MP4_FILE" 2>/dev/null || echo "0")
                     if [ $UPLOAD_DURATION -gt 0 ]; then
                       UPLOAD_SPEED=$(echo "scale=2; $FILESIZE / $UPLOAD_DURATION / 1024 / 1024" | bc 2>/dev/null || echo "0")
                       echo "  Speed: ${UPLOAD_SPEED} MB/s"
@@ -662,42 +695,49 @@ jobs:
                       UPLOAD_SPEED="0"
                     fi
                     
-                    # Create/update database
+                    # Create/update database with file locking
                     if [ ! -f database/uploads.json ]; then
+                      mkdir -p database
                       echo '{"records":[]}' > database/uploads.json
                     fi
                     
-                    RECORD=$(jq -n \
-                      --arg id "${{ matrix.channel.username }}_$(date +%s)" \
-                      --arg username "${{ matrix.channel.username }}" \
-                      --arg site "${{ matrix.channel.site }}" \
-                      --arg filename "$(basename "$MP4_FILE")" \
-                      --arg link "$DOWNLOAD_LINK" \
-                      --arg uploaded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                      --arg filesize "$FILESIZE" \
-                      --arg upload_duration "$UPLOAD_DURATION" \
-                      --arg upload_speed "$UPLOAD_SPEED" \
-                      --arg convert_duration "$CONVERT_DURATION" \
-                      '{
-                        id: $id,
-                        username: $username,
-                        site: $site,
-                        filename: $filename,
-                        gofile_link: $link,
-                        uploaded_at: $uploaded_at,
-                        filesize_bytes: ($filesize | tonumber),
-                        upload_duration: ($upload_duration | tonumber),
-                        upload_speed: ($upload_speed | tonumber),
-                        convert_duration: ($convert_duration | tonumber),
-                        status: "uploaded"
-                      }')
-                    
-                    if jq ".records += [$RECORD]" database/uploads.json > database/uploads.json.tmp 2>/dev/null; then
-                      mv database/uploads.json.tmp database/uploads.json
-                    else
-                      echo "✗ Failed to update database"
-                      rm -f database/uploads.json.tmp
-                    fi
+                    # Use flock for database operations to prevent race conditions
+                    (
+                      flock -x 200
+                      
+                      RECORD=$(jq -n \
+                        --arg id "${{ matrix.channel.username }}_$(date +%s)_$$" \
+                        --arg username "${{ matrix.channel.username }}" \
+                        --arg site "${{ matrix.channel.site }}" \
+                        --arg filename "$(basename "$MP4_FILE")" \
+                        --arg link "$DOWNLOAD_LINK" \
+                        --arg uploaded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                        --arg filesize "$FILESIZE" \
+                        --arg upload_duration "$UPLOAD_DURATION" \
+                        --arg upload_speed "$UPLOAD_SPEED" \
+                        --arg convert_duration "$CONVERT_DURATION" \
+                        '{
+                          id: $id,
+                          username: $username,
+                          site: $site,
+                          filename: $filename,
+                          gofile_link: $link,
+                          uploaded_at: $uploaded_at,
+                          filesize_bytes: ($filesize | tonumber),
+                          upload_duration: ($upload_duration | tonumber),
+                          upload_speed: ($upload_speed | tonumber),
+                          convert_duration: ($convert_duration | tonumber),
+                          status: "uploaded"
+                        }')
+                      
+                      if jq ".records += [$RECORD]" database/uploads.json > database/uploads.json.tmp 2>/dev/null; then
+                        mv database/uploads.json.tmp database/uploads.json
+                        echo "✓ Database updated"
+                      else
+                        echo "✗ Failed to update database"
+                        rm -f database/uploads.json.tmp
+                      fi
+                    ) 200>database/.lock
                     
                     # Step 3: Delete local files
                     echo "Deleting local files..."
@@ -735,20 +775,29 @@ jobs:
           echo "=== Processing Complete ==="
           echo "Processed: $PROCESSED_COUNT files"
           echo "Failed: $FAILED_COUNT files"
+          
           if [ -f database/uploads.json ]; then
-            TOTAL_UPLOADS=$(jq '.records | length' database/uploads.json)
+            TOTAL_UPLOADS=$(jq '.records | length' database/uploads.json 2>/dev/null || echo "0")
             echo "Total uploads in database: $TOTAL_UPLOADS"
             
             # Calculate total uploaded size
             TOTAL_SIZE=$(jq '[.records[].filesize_bytes] | add // 0' database/uploads.json 2>/dev/null || echo "0")
-            if [ "$TOTAL_SIZE" -gt 0 ]; then
+            if [ "$TOTAL_SIZE" != "0" ] && [ "$TOTAL_SIZE" -gt 0 ]; then
               TOTAL_SIZE_GB=$(echo "scale=2; $TOTAL_SIZE / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
               echo "Total uploaded: ${TOTAL_SIZE_GB}GB"
             fi
+            
+            # Show recent uploads
+            echo ""
+            echo "Recent uploads:"
+            jq -r '.records[-5:] | .[] | "  - \(.filename) (\(.filesize_bytes / 1024 / 1024 | floor)MB) -> \(.gofile_link)"' database/uploads.json 2>/dev/null || echo "  (none)"
+          else
+            echo "No database file found"
           fi
           
           # Show remaining disk space
           FINAL_AVAILABLE=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
+          echo ""
           echo "Final disk space: ${FINAL_AVAILABLE}GB available"
           
           # Cleanup processed directory
@@ -756,6 +805,8 @@ jobs:
             echo "Cleaning up processed directory..."
             rm -rf processed
           fi
+          
+          echo "============================"
       
       - name: Save database
         uses: actions/cache/save@v4
