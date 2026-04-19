@@ -121,6 +121,16 @@ jobs:
         channel: ${{ fromJson(needs.setup.outputs.channels) }}
       fail-fast: false
       max-parallel: 20
+    
+    services:
+      flaresolverr:
+        image: ghcr.io/flaresolverr/flaresolverr:latest
+        ports:
+          - 8191:8191
+        env:
+          LOG_LEVEL: info
+          CAPTCHA_SOLVER: none
+    
     steps:
       - uses: actions/checkout@v4
       
@@ -149,6 +159,7 @@ jobs:
         env:
           COOKIES: ${{ secrets.CHATURBATE_COOKIES }}
           USER_AGENT: ${{ secrets.USER_AGENT }}
+          FLARESOLVERR_URL: http://localhost:8191/v1
         run: |
           mkdir -p videos conf database/backups
           

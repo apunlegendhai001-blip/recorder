@@ -97,7 +97,37 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 	// Use the correct POST API
 	body, err := internal.PostChaturbateAPI(ctx, username, csrfToken)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get stream info: %w", err)
+		// If Cloudflare blocked us, try to get fresh cookies via FlareSolverr
+		if errors.Is(err, internal.ErrCloudflareBlocked) {
+			if server.Config.Debug {
+				fmt.Printf("[DEBUG] Cloudflare block detected, trying FlareSolverr...\n")
+			}
+			
+			// Get fresh cookies from FlareSolverr
+			cookies, userAgent, fsErr := internal.GetFreshCookies(ctx, fmt.Sprintf("%s%s/", server.Config.Domain, username))
+			if fsErr != nil {
+				if server.Config.Debug {
+					fmt.Printf("[DEBUG] FlareSolverr failed: %v\n", fsErr)
+				}
+				return nil, fmt.Errorf("failed to get stream info: %w", err)
+			}
+			
+			// Update config with fresh cookies
+			server.Config.Cookies = cookies
+			server.Config.UserAgent = userAgent
+			
+			if server.Config.Debug {
+				fmt.Printf("[DEBUG] Got fresh cookies, retrying API call...\n")
+			}
+			
+			// Retry with fresh cookies
+			body, err = internal.PostChaturbateAPI(ctx, username, csrfToken)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get stream info after FlareSolverr: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("failed to get stream info: %w", err)
+		}
 	}
 	
 	if server.Config.Debug {
