@@ -522,6 +522,8 @@ jobs:
           # Mark any remaining files as complete (only if non-empty)
           echo "Marking all completed files..."
           MARKED_COUNT=0
+          TEMP_MARKER_LIST=$(mktemp)
+          
           find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | while read VIDEO_FILE; do
             if [ -f "$VIDEO_FILE" ]; then
               FILE_SIZE=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || echo "0")
@@ -531,7 +533,7 @@ jobs:
                 if [ ! -f "$MARKER" ]; then
                   touch "$MARKER"
                   echo "✓ Marked: $(basename "$VIDEO_FILE") (${FILE_SIZE} bytes)"
-                  MARKED_COUNT=$((MARKED_COUNT + 1))
+                  echo "1" >> "$TEMP_MARKER_LIST"
                 fi
               else
                 echo "⚠️  Skipping empty file: $(basename "$VIDEO_FILE")"
@@ -540,6 +542,8 @@ jobs:
             fi
           done
           
+          MARKED_COUNT=$(wc -l < "$TEMP_MARKER_LIST" 2>/dev/null || echo "0")
+          rm -f "$TEMP_MARKER_LIST"
           echo "Marked $MARKED_COUNT file(s) for upload"
           
           # List completed recordings
@@ -602,8 +606,17 @@ jobs:
           
           # Delete oldest files until under 8GB
           TARGET_SIZE=$((8 * 1024 * 1024 * 1024))  # 8GB target
+          MAX_ITERATIONS=100  # Safety limit to prevent infinite loop
+          ITERATION_COUNT=0
           
           while true; do
+            ITERATION_COUNT=$((ITERATION_COUNT + 1))
+            
+            if [ $ITERATION_COUNT -gt $MAX_ITERATIONS ]; then
+              echo "⚠️  Reached maximum iterations ($MAX_ITERATIONS) - stopping cleanup"
+              break
+            fi
+            
             CURRENT_SIZE=$(du -sb videos 2>/dev/null | cut -f1 || echo "0")
             if [ "$CURRENT_SIZE" -le "$TARGET_SIZE" ]; then
               break
@@ -612,6 +625,7 @@ jobs:
             # Find and delete oldest video file
             OLDEST=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) -printf '%T+ %p\n' 2>/dev/null | sort | head -1 | cut -d' ' -f2-)
             if [ -z "$OLDEST" ]; then
+              echo "⚠️  No more files to delete"
               break
             fi
             
@@ -792,84 +806,94 @@ jobs:
             ITERATION_PROCESSED=0
             ITERATION_FAILED=0
           
-          # Process each completed file
-          for MARKER in $COMPLETED_FILES; do
-            VIDEO_FILE="${MARKER%.uploaded}"
-            CONVERT_DURATION=0  # Initialize to prevent undefined variable
-            
-            if [ ! -f "$VIDEO_FILE" ]; then
-              echo "Warning: Marker found but file missing: $VIDEO_FILE"
-              rm -f "$MARKER"
-              continue
-            fi
-            
-            # Skip empty or corrupted files
-            VIDEO_SIZE_BYTES=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || echo "0")
-            if [ "$VIDEO_SIZE_BYTES" -lt 1024 ]; then
-              echo "Warning: File too small or empty: $VIDEO_FILE (${VIDEO_SIZE_BYTES} bytes)"
-              rm -f "$VIDEO_FILE" "$MARKER"
-              continue
-            fi
-            
-            BASENAME=$(basename "$VIDEO_FILE")
-            FILE_EXT="${BASENAME##*.}"
-            BASENAME_NO_EXT="${BASENAME%.*}"
-            MP4_FILE="processed/${BASENAME_NO_EXT}.mp4"
-            
-            echo ""
-            echo "=== Processing: $BASENAME ==="
-            
-            # Check disk space before processing
-            AVAILABLE_GB=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
-            if [ "$AVAILABLE_GB" -lt 1 ]; then
-              echo "⚠️  Skipping: Insufficient disk space (${AVAILABLE_GB}GB)"
-              continue
-            fi
-            
-            # For conversion, we need 2x the source file size
-            # Check if we have enough space
-            REQUIRED_GB=$(echo "scale=0; ($VIDEO_SIZE_BYTES * 2) / 1024 / 1024 / 1024 + 1" | bc 2>/dev/null || echo "2")
-            if [ "$AVAILABLE_GB" -lt "$REQUIRED_GB" ]; then
-              echo "⚠️  Skipping: Need ${REQUIRED_GB}GB for conversion, only have ${AVAILABLE_GB}GB"
-              continue
-            fi
-            
-            VIDEO_SIZE=$(du -h "$VIDEO_FILE" | cut -f1)
-            echo "Input: $VIDEO_FILE ($VIDEO_SIZE)"
-            
-            # Step 1: Convert to MP4 if needed (skip if already MP4)
-            if [ "$FILE_EXT" = "mp4" ]; then
-              echo "File is already MP4, skipping conversion"
-              MP4_FILE="$VIDEO_FILE"
-              CONVERT_DURATION=0
-            else
-              echo "Converting to MP4..."
+            # Process each completed file
+            for MARKER in $COMPLETED_FILES; do
+              VIDEO_FILE="${MARKER%.uploaded}"
+              CONVERT_DURATION=0  # Initialize to prevent undefined variable
               
-              # Calculate timeout based on file size (30 min + 10 min per GB over 2GB)
-              FILE_SIZE_GB=$(echo "scale=2; $VIDEO_SIZE_BYTES / 1024 / 1024 / 1024" | bc)
-              CONVERT_TIMEOUT=30
-              
-              if (( $(echo "$FILE_SIZE_GB > 2" | bc -l) )); then
-                EXTRA_TIME=$(echo "($FILE_SIZE_GB - 2) * 10" | bc | cut -d. -f1)
-                CONVERT_TIMEOUT=$((30 + EXTRA_TIME))
-                echo "Large file (${FILE_SIZE_GB}GB) - using ${CONVERT_TIMEOUT} minute timeout"
-              fi
-              
-              CONVERT_START=$(date +%s)
-              if timeout ${CONVERT_TIMEOUT}m ffmpeg -nostdin -y -i "$VIDEO_FILE" -c copy -movflags +faststart "$MP4_FILE" 2>&1 | tail -20; then
-                CONVERT_END=$(date +%s)
-                CONVERT_DURATION=$((CONVERT_END - CONVERT_START))
-                MP4_SIZE=$(du -h "$MP4_FILE" | cut -f1)
-                echo "✓ Conversion successful: $MP4_FILE ($MP4_SIZE) in ${CONVERT_DURATION}s"
-              else
-                echo "✗ Conversion failed or timed out"
-                ITERATION_FAILED=$((ITERATION_FAILED + 1))
-                FAILED_COUNT=$((FAILED_COUNT + 1))
-                # Remove marker so it can be retried
+              if [ ! -f "$VIDEO_FILE" ]; then
+                echo "Warning: Marker found but file missing: $VIDEO_FILE"
                 rm -f "$MARKER"
                 continue
               fi
-            fi
+              
+              # Skip empty or corrupted files
+              VIDEO_SIZE_BYTES=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || echo "0")
+              if [ "$VIDEO_SIZE_BYTES" -lt 1024 ]; then
+                echo "Warning: File too small or empty: $VIDEO_FILE (${VIDEO_SIZE_BYTES} bytes)"
+                rm -f "$VIDEO_FILE" "$MARKER"
+                continue
+              fi
+              
+              BASENAME=$(basename "$VIDEO_FILE")
+              FILE_EXT="${BASENAME##*.}"
+              BASENAME_NO_EXT="${BASENAME%.*}"
+              MP4_FILE="processed/${BASENAME_NO_EXT}.mp4"
+              
+              echo ""
+              echo "=== Processing: $BASENAME ==="
+              
+              # Check disk space before processing
+              AVAILABLE_GB=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
+              if [ "$AVAILABLE_GB" -lt 1 ]; then
+                echo "⚠️  Skipping: Insufficient disk space (${AVAILABLE_GB}GB)"
+                continue
+              fi
+              
+              # For conversion, we need 2x the source file size
+              # Check if we have enough space
+              if [ -n "$VIDEO_SIZE_BYTES" ] && [ "$VIDEO_SIZE_BYTES" -gt 0 ]; then
+                REQUIRED_GB=$(echo "scale=0; ($VIDEO_SIZE_BYTES * 2) / 1024 / 1024 / 1024 + 1" | bc 2>/dev/null || echo "2")
+              else
+                REQUIRED_GB=2
+              fi
+              
+              if [ "$AVAILABLE_GB" -lt "$REQUIRED_GB" ]; then
+                echo "⚠️  Skipping: Need ${REQUIRED_GB}GB for conversion, only have ${AVAILABLE_GB}GB"
+                continue
+              fi
+              
+              VIDEO_SIZE=$(du -h "$VIDEO_FILE" | cut -f1)
+              echo "Input: $VIDEO_FILE ($VIDEO_SIZE)"
+            
+              # Step 1: Convert to MP4 if needed (skip if already MP4)
+              if [ "$FILE_EXT" = "mp4" ]; then
+                echo "File is already MP4, skipping conversion"
+                MP4_FILE="$VIDEO_FILE"
+                CONVERT_DURATION=0
+              else
+                echo "Converting to MP4..."
+                
+                # Calculate timeout based on file size (30 min + 10 min per GB over 2GB)
+                if [ -n "$VIDEO_SIZE_BYTES" ] && [ "$VIDEO_SIZE_BYTES" -gt 0 ]; then
+                  FILE_SIZE_GB=$(echo "scale=2; $VIDEO_SIZE_BYTES / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "1")
+                else
+                  FILE_SIZE_GB=1
+                fi
+                
+                CONVERT_TIMEOUT=30
+                
+                if (( $(echo "$FILE_SIZE_GB > 2" | bc -l) )); then
+                  EXTRA_TIME=$(echo "($FILE_SIZE_GB - 2) * 10" | bc | cut -d. -f1)
+                  CONVERT_TIMEOUT=$((30 + EXTRA_TIME))
+                  echo "Large file (${FILE_SIZE_GB}GB) - using ${CONVERT_TIMEOUT} minute timeout"
+                fi
+                
+                CONVERT_START=$(date +%s)
+                if timeout ${CONVERT_TIMEOUT}m ffmpeg -nostdin -y -i "$VIDEO_FILE" -c copy -movflags +faststart "$MP4_FILE" 2>&1 | tail -20; then
+                  CONVERT_END=$(date +%s)
+                  CONVERT_DURATION=$((CONVERT_END - CONVERT_START))
+                  MP4_SIZE=$(du -h "$MP4_FILE" | cut -f1)
+                  echo "✓ Conversion successful: $MP4_FILE ($MP4_SIZE) in ${CONVERT_DURATION}s"
+                else
+                  echo "✗ Conversion failed or timed out"
+                  ITERATION_FAILED=$((ITERATION_FAILED + 1))
+                  FAILED_COUNT=$((FAILED_COUNT + 1))
+                  # Remove marker so it can be retried
+                  rm -f "$MARKER"
+                  continue
+                fi
+              fi
             
             # Verify MP4 was created successfully
             if [ ! -f "$MP4_FILE" ]; then
@@ -891,11 +915,11 @@ jobs:
               continue
             fi
               
-              MP4_SIZE_GB=$(echo "scale=2; $MP4_SIZE_BYTES / 1024 / 1024 / 1024" | bc)
+              MP4_SIZE_GB=$(echo "scale=2; $MP4_SIZE_BYTES / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
               
               if (( $(echo "$MP4_SIZE_GB > 5" | bc -l) )); then
                 echo "⚠️  WARNING: Large file (${MP4_SIZE_GB}GB) - upload may be slow"
-                EST_MINUTES=$(echo "$MP4_SIZE_GB * 10" | bc)
+                EST_MINUTES=$(echo "$MP4_SIZE_GB * 10" | bc 2>/dev/null || echo "60")
                 echo "Estimated upload time: ~${EST_MINUTES} minutes at 10MB/s"
               fi
               
@@ -904,8 +928,18 @@ jobs:
               TIME_ELAPSED=$((CURRENT_TIME - JOB_START))
               TIME_REMAINING=$((MAX_JOB_TIME - TIME_ELAPSED))
               
-              # Estimate upload time (assume 2MB/s minimum)
-              FILE_SIZE_MB=$(echo "scale=0; $MP4_SIZE_BYTES / 1024 / 1024" | bc)
+              # Estimate upload time (assume 2MB/s minimum) - calculate once
+              if [ -n "$MP4_SIZE_BYTES" ] && [ "$MP4_SIZE_BYTES" -gt 0 ]; then
+                FILE_SIZE_MB=$(echo "scale=0; $MP4_SIZE_BYTES / 1024 / 1024" | bc 2>/dev/null || echo "1")
+              else
+                FILE_SIZE_MB=1
+              fi
+              
+              # Ensure FILE_SIZE_MB is at least 1 to avoid division issues
+              if [ "$FILE_SIZE_MB" -lt 1 ]; then
+                FILE_SIZE_MB=1
+              fi
+              
               ESTIMATED_UPLOAD_SECONDS=$((FILE_SIZE_MB / 2))
               ESTIMATED_UPLOAD_MINUTES=$((ESTIMATED_UPLOAD_SECONDS / 60 + 10))  # Add 10 min buffer
               
@@ -947,7 +981,7 @@ jobs:
                 fi
                 
                 # Calculate upload timeout based on file size (assume 2MB/s minimum)
-                FILE_SIZE_MB=$(echo "scale=0; $MP4_SIZE_BYTES / 1024 / 1024" | bc)
+                # Reuse FILE_SIZE_MB calculated earlier
                 UPLOAD_TIMEOUT=$((FILE_SIZE_MB / 2 / 60 + 10))  # Size/2MB/s/60s + 10min buffer
                 
                 # Minimum 60 minutes, maximum 180 minutes
@@ -1079,48 +1113,48 @@ jobs:
                 # Keep files for retry in next run
               fi
             fi
-          done
-          
-          echo ""
-          echo "=== Iteration #$ITERATION Summary ==="
-          echo "Processed: $ITERATION_PROCESSED files"
-          echo "Failed: $ITERATION_FAILED files"
-          echo "Total processed: $PROCESSED_COUNT files"
-          echo "Total failed: $FAILED_COUNT files"
-          
-          if [ -f database/uploads.json ]; then
-            TOTAL_UPLOADS=$(jq '.records | length' database/uploads.json 2>/dev/null || echo "0")
-            echo "Total uploads in database: $TOTAL_UPLOADS"
+            done  # End of for loop processing files
             
-            # Calculate total uploaded size
-            TOTAL_SIZE=$(jq '[.records[].filesize_bytes] | add // 0' database/uploads.json 2>/dev/null || echo "0")
-            if [ "$TOTAL_SIZE" != "0" ] && [ "$TOTAL_SIZE" -gt 0 ]; then
-              TOTAL_SIZE_GB=$(echo "scale=2; $TOTAL_SIZE / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
-              echo "Total uploaded: ${TOTAL_SIZE_GB}GB"
+            echo ""
+            echo "=== Iteration #$ITERATION Summary ==="
+            echo "Processed: $ITERATION_PROCESSED files"
+            echo "Failed: $ITERATION_FAILED files"
+            echo "Total processed: $PROCESSED_COUNT files"
+            echo "Total failed: $FAILED_COUNT files"
+            
+            if [ -f database/uploads.json ]; then
+              TOTAL_UPLOADS=$(jq '.records | length' database/uploads.json 2>/dev/null || echo "0")
+              echo "Total uploads in database: $TOTAL_UPLOADS"
+              
+              # Calculate total uploaded size
+              TOTAL_SIZE=$(jq '[.records[].filesize_bytes] | add // 0' database/uploads.json 2>/dev/null || echo "0")
+              if [ "$TOTAL_SIZE" != "0" ] && [ "$TOTAL_SIZE" -gt 0 ]; then
+                TOTAL_SIZE_GB=$(echo "scale=2; $TOTAL_SIZE / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
+                echo "Total uploaded: ${TOTAL_SIZE_GB}GB"
+              fi
+              
+              # Show recent uploads
+              echo ""
+              echo "Recent uploads:"
+              jq -r '.records[-5:] | .[] | "  - \(.filename) (\(.filesize_bytes / 1024 / 1024 | floor)MB) -> \(.gofile_link)"' database/uploads.json 2>/dev/null || echo "  (none)"
+            else
+              echo "No database file found"
             fi
             
-            # Show recent uploads
+            # Show remaining disk space
+            FINAL_AVAILABLE=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
             echo ""
-            echo "Recent uploads:"
-            jq -r '.records[-5:] | .[] | "  - \(.filename) (\(.filesize_bytes / 1024 / 1024 | floor)MB) -> \(.gofile_link)"' database/uploads.json 2>/dev/null || echo "  (none)"
-          else
-            echo "No database file found"
-          fi
+            echo "Final disk space: ${FINAL_AVAILABLE}GB available"
+            
+            # Cleanup processed directory
+            if [ -d processed ]; then
+              echo "Cleaning up processed directory..."
+              rm -rf processed
+            fi
+            
+            echo "============================"
           
-          # Show remaining disk space
-          FINAL_AVAILABLE=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
-          echo ""
-          echo "Final disk space: ${FINAL_AVAILABLE}GB available"
-          
-          # Cleanup processed directory
-          if [ -d processed ]; then
-            echo "Cleaning up processed directory..."
-            rm -rf processed
-          fi
-          
-          echo "============================"
-          
-          fi  # End of else block (files found)
+          fi  # End of if/else block for COMPLETED_FILES check
           
           # If no files were processed, wait before next iteration
           if [ "$ITERATION_PROCESSED" -eq 0 ]; then
