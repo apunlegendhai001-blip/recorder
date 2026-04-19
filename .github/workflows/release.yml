@@ -27,6 +27,7 @@ on:
         default: '45'
         type: choice
         options:
+          - '1'
           - '15'
           - '30'
           - '45'
