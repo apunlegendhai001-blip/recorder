@@ -152,10 +152,18 @@ jobs:
         run: |
           mkdir -p videos conf database/backups
           
+          # Sanitize cookies - remove any newlines or control characters
+          CLEAN_COOKIES=$(echo "$COOKIES" | tr -d '\n\r\t' | tr -s ' ')
+          CLEAN_UA=$(echo "$USER_AGENT" | tr -d '\n\r\t' | tr -s ' ')
+          
+          # Debug: Show cookie length (not content for security)
+          echo "Cookie string length: ${#CLEAN_COOKIES}"
+          echo "User agent length: ${#CLEAN_UA}"
+          
           # Create settings.json using jq for proper JSON escaping
           jq -n \
-            --arg cookies "$COOKIES" \
-            --arg ua "$USER_AGENT" \
+            --arg cookies "$CLEAN_COOKIES" \
+            --arg ua "$CLEAN_UA" \
             '{
               cookies: $cookies,
               user_agent: $ua,
@@ -165,6 +173,9 @@ jobs:
               ffmpeg_quality: 23,
               ffmpeg_preset: "medium"
             }' > conf/settings.json
+          
+          # Debug: Verify settings.json was created properly
+          echo "Settings file created, size: $(wc -c < conf/settings.json) bytes"
           
           # Run with timeout and proper error handling
           timeout 5h ./goondvr \
