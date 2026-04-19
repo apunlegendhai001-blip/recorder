@@ -411,9 +411,12 @@ jobs:
             RECORDED_SOMETHING=false
             CONSECUTIVE_OFFLINE=0
             MAX_CONSECUTIVE_OFFLINE=5  # Stop after 5 consecutive offline checks (5 * interval minutes)
+            TOTAL_ATTEMPTS=0
+            MAX_INITIAL_ATTEMPTS=30  # Max attempts before first recording (30 * interval = 30 minutes with interval=1)
             
             while true; do
               echo "Starting recording attempt..."
+              TOTAL_ATTEMPTS=$((TOTAL_ATTEMPTS + 1))
               
               # Record without conversion/upload - just save video files
               timeout 30m ./goondvr \
@@ -434,6 +437,7 @@ jobs:
               
               if [ "$VIDEO_COUNT" -gt 0 ]; then
                 RECORDED_SOMETHING=true
+                TOTAL_ATTEMPTS=0  # Reset attempt counter once recording starts
                 echo "✓ Found $VIDEO_COUNT video file(s)"
               fi
               
@@ -446,6 +450,13 @@ jobs:
                   echo "🎬 Stream has ended - proceeding to upload"
                   break
                 fi
+              else
+                # If never recorded and too many attempts, stop to allow restart
+                if [ $TOTAL_ATTEMPTS -ge $MAX_INITIAL_ATTEMPTS ]; then
+                  echo "⏸️  Streamer offline after $TOTAL_ATTEMPTS attempts - will retry on next run"
+                  break
+                fi
+                echo "Streamer offline (attempt $TOTAL_ATTEMPTS/$MAX_INITIAL_ATTEMPTS)"
               fi
               
               # If timeout (124), continue recording
