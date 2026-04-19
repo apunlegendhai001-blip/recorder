@@ -308,7 +308,16 @@ jobs:
           (
             RECORDING_STARTED=false
             OFFLINE_COUNT=0
-            MAX_OFFLINE_CHECKS=3  # Stop after 3 consecutive offline checks post-recording
+            
+            # For very short recordings (1-5 min), stop after 1 offline check
+            # For longer recordings, stop after 3 offline checks
+            MAX_DURATION_VAL="${{ inputs.max_duration || '45' }}"
+            if [ "$MAX_DURATION_VAL" -le 5 ]; then
+              MAX_OFFLINE_CHECKS=1
+            else
+              MAX_OFFLINE_CHECKS=3
+            fi
+            
             START_TIME=$(date +%s)
             MAX_MONITOR_TIME=$((5 * 3600))  # 5 hours (less than job timeout of 6.5h)
             
@@ -422,7 +431,16 @@ jobs:
             # Track if we've recorded anything
             RECORDED_SOMETHING=false
             CONSECUTIVE_OFFLINE=0
-            MAX_CONSECUTIVE_OFFLINE=5  # Stop after 5 consecutive offline checks (5 * interval minutes)
+            
+            # For very short recordings (1-5 min), stop after 2 offline checks
+            # For longer recordings, stop after 5 offline checks
+            if [ "$MAX_DURATION" -le 5 ]; then
+              MAX_CONSECUTIVE_OFFLINE=2
+              echo "Short recording mode: will stop after 2 offline checks"
+            else
+              MAX_CONSECUTIVE_OFFLINE=5
+            fi
+            
             TOTAL_ATTEMPTS=0
             MAX_INITIAL_ATTEMPTS=30  # Max attempts before first recording (30 * interval = 30 minutes with interval=1)
             
