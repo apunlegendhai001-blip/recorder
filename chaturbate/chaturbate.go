@@ -107,9 +107,9 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 			var hlsURL, status string
 			var scrapeErr error
 			
-			for attempt := 1; attempt <= 2; attempt++ {
+			for attempt := 1; attempt <= 3; attempt++ {
 				if server.Config.Debug {
-					fmt.Printf("[DEBUG] FlareSolverr attempt %d/2...\n", attempt)
+					fmt.Printf("[DEBUG] FlareSolverr attempt %d/3...\n", attempt)
 				}
 				
 				hlsURL, status, scrapeErr = internal.ScrapeChaturbateStreamWithFlareSolverr(ctx, username)
@@ -121,8 +121,13 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 					fmt.Printf("[DEBUG] FlareSolverr attempt %d failed: %v\n", attempt, scrapeErr)
 				}
 				
-				if attempt < 2 {
-					time.Sleep(5 * time.Second)
+				// Longer delay between retries to avoid FlareSolverr congestion
+				if attempt < 3 {
+					delay := time.Duration(10+attempt*10) * time.Second
+					if server.Config.Debug {
+						fmt.Printf("[DEBUG] Waiting %v before retry...\n", delay)
+					}
+					time.Sleep(delay)
 				}
 			}
 			

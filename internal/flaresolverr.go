@@ -71,7 +71,7 @@ func GetFreshCookies(ctx context.Context, url string) (string, string, error) {
 
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 120 * time.Second} // Increased timeout for Cloudflare challenges
+	client := &http.Client{Timeout: 180 * time.Second} // 3 minutes for Cloudflare challenges + queue wait
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", fmt.Errorf("do request: %w", err)
