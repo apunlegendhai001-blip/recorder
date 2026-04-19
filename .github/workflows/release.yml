@@ -769,9 +769,8 @@ jobs:
               echo "Videos directory does not exist"
             fi
             # Don't exit - continue loop to wait for files
-            PROCESSED_COUNT=0
-            FAILED_COUNT=0
-          else
+            ITERATION_PROCESSED=0
+            ITERATION_FAILED=0
           else
             
             FILE_COUNT=$(echo "$COMPLETED_FILES" | wc -l)
