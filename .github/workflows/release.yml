@@ -792,12 +792,12 @@ jobs:
             ITERATION_PROCESSED=0
             ITERATION_FAILED=0
           
-          # Process each completed file
-          for MARKER in $COMPLETED_FILES; do
-            VIDEO_FILE="${MARKER%.uploaded}"
-            CONVERT_DURATION=0  # Initialize to prevent undefined variable
-            
-            if [ ! -f "$VIDEO_FILE" ]; then
+            # Process each completed file
+            for MARKER in $COMPLETED_FILES; do
+              VIDEO_FILE="${MARKER%.uploaded}"
+              CONVERT_DURATION=0  # Initialize to prevent undefined variable
+              
+              if [ ! -f "$VIDEO_FILE" ]; then
               echo "Warning: Marker found but file missing: $VIDEO_FILE"
               rm -f "$MARKER"
               continue
@@ -1079,48 +1079,48 @@ jobs:
                 # Keep files for retry in next run
               fi
             fi
-          done
-          
-          echo ""
-          echo "=== Iteration #$ITERATION Summary ==="
-          echo "Processed: $ITERATION_PROCESSED files"
-          echo "Failed: $ITERATION_FAILED files"
-          echo "Total processed: $PROCESSED_COUNT files"
-          echo "Total failed: $FAILED_COUNT files"
-          
-          if [ -f database/uploads.json ]; then
-            TOTAL_UPLOADS=$(jq '.records | length' database/uploads.json 2>/dev/null || echo "0")
-            echo "Total uploads in database: $TOTAL_UPLOADS"
+            done  # End of for loop processing files
             
-            # Calculate total uploaded size
-            TOTAL_SIZE=$(jq '[.records[].filesize_bytes] | add // 0' database/uploads.json 2>/dev/null || echo "0")
-            if [ "$TOTAL_SIZE" != "0" ] && [ "$TOTAL_SIZE" -gt 0 ]; then
-              TOTAL_SIZE_GB=$(echo "scale=2; $TOTAL_SIZE / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
-              echo "Total uploaded: ${TOTAL_SIZE_GB}GB"
+            echo ""
+            echo "=== Iteration #$ITERATION Summary ==="
+            echo "Processed: $ITERATION_PROCESSED files"
+            echo "Failed: $ITERATION_FAILED files"
+            echo "Total processed: $PROCESSED_COUNT files"
+            echo "Total failed: $FAILED_COUNT files"
+            
+            if [ -f database/uploads.json ]; then
+              TOTAL_UPLOADS=$(jq '.records | length' database/uploads.json 2>/dev/null || echo "0")
+              echo "Total uploads in database: $TOTAL_UPLOADS"
+              
+              # Calculate total uploaded size
+              TOTAL_SIZE=$(jq '[.records[].filesize_bytes] | add // 0' database/uploads.json 2>/dev/null || echo "0")
+              if [ "$TOTAL_SIZE" != "0" ] && [ "$TOTAL_SIZE" -gt 0 ]; then
+                TOTAL_SIZE_GB=$(echo "scale=2; $TOTAL_SIZE / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
+                echo "Total uploaded: ${TOTAL_SIZE_GB}GB"
+              fi
+              
+              # Show recent uploads
+              echo ""
+              echo "Recent uploads:"
+              jq -r '.records[-5:] | .[] | "  - \(.filename) (\(.filesize_bytes / 1024 / 1024 | floor)MB) -> \(.gofile_link)"' database/uploads.json 2>/dev/null || echo "  (none)"
+            else
+              echo "No database file found"
             fi
             
-            # Show recent uploads
+            # Show remaining disk space
+            FINAL_AVAILABLE=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
             echo ""
-            echo "Recent uploads:"
-            jq -r '.records[-5:] | .[] | "  - \(.filename) (\(.filesize_bytes / 1024 / 1024 | floor)MB) -> \(.gofile_link)"' database/uploads.json 2>/dev/null || echo "  (none)"
-          else
-            echo "No database file found"
-          fi
+            echo "Final disk space: ${FINAL_AVAILABLE}GB available"
+            
+            # Cleanup processed directory
+            if [ -d processed ]; then
+              echo "Cleaning up processed directory..."
+              rm -rf processed
+            fi
+            
+            echo "============================"
           
-          # Show remaining disk space
-          FINAL_AVAILABLE=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
-          echo ""
-          echo "Final disk space: ${FINAL_AVAILABLE}GB available"
-          
-          # Cleanup processed directory
-          if [ -d processed ]; then
-            echo "Cleaning up processed directory..."
-            rm -rf processed
-          fi
-          
-          echo "============================"
-          
-          fi  # End of else block (files found)
+          fi  # End of if/else block for COMPLETED_FILES check
           
           # If no files were processed, wait before next iteration
           if [ "$ITERATION_PROCESSED" -eq 0 ]; then
