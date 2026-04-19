@@ -152,18 +152,19 @@ jobs:
         run: |
           mkdir -p videos conf database/backups
           
-          # Create settings.json with cookies and user agent using cat with proper escaping
-          cat > conf/settings.json << EOF
-          {
-            "cookies": "${COOKIES}",
-            "user_agent": "${USER_AGENT}",
-            "finalize_mode": "remux",
-            "ffmpeg_encoder": "libx264",
-            "ffmpeg_container": "mp4",
-            "ffmpeg_quality": 23,
-            "ffmpeg_preset": "medium"
-          }
-          EOF
+          # Create settings.json using jq for proper JSON escaping
+          jq -n \
+            --arg cookies "$COOKIES" \
+            --arg ua "$USER_AGENT" \
+            '{
+              cookies: $cookies,
+              user_agent: $ua,
+              finalize_mode: "remux",
+              ffmpeg_encoder: "libx264",
+              ffmpeg_container: "mp4",
+              ffmpeg_quality: 23,
+              ffmpeg_preset: "medium"
+            }' > conf/settings.json
           
           # Run with timeout and proper error handling
           timeout 5h ./goondvr \
