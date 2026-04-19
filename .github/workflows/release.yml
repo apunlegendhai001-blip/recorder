@@ -12,7 +12,8 @@ on:
     paths:
       - '.github/channels.json'
   schedule:
-    - cron: '0 */5 * * *'
+    - cron: '0 */5 * * *'  # Every 5 hours - primary schedule
+    - cron: '30 */6 * * *'  # Every 6 hours at :30 - backup restart trigger
   workflow_dispatch:
     inputs:
       max_duration:
@@ -221,9 +222,11 @@ jobs:
           
           # Test FlareSolverr
           echo "Testing FlareSolverr..."
-          curl -s -X POST http://localhost:8191/v1 \
+          curl -s --max-time 30 -X POST http://localhost:8191/v1 \
             -H "Content-Type: application/json" \
-            -d '{"cmd":"request.get","url":"https://chaturbate.com","maxTimeout":60000}' | jq .
+            -d '{"cmd":"request.get","url":"https://chaturbate.com","maxTimeout":60000}' | jq . || {
+              echo "⚠️  FlareSolverr test failed or timed out"
+            }
       
       - name: Record
         id: record
@@ -297,7 +300,23 @@ jobs:
           
           # Start background monitor for disk space and file marking
           (
+            RECORDING_STARTED=false
+            OFFLINE_COUNT=0
+            MAX_OFFLINE_CHECKS=3  # Stop after 3 consecutive offline checks post-recording
+            START_TIME=$(date +%s)
+            MAX_MONITOR_TIME=$((6 * 3600))  # 6 hours absolute maximum
+            
             while true; do
+              # Check if monitor has been running too long
+              CURRENT_TIME=$(date +%s)
+              ELAPSED=$((CURRENT_TIME - START_TIME))
+              
+              if [ $ELAPSED -gt $MAX_MONITOR_TIME ]; then
+                echo "⏱️  Monitor timeout reached (6 hours) - stopping"
+                pkill -f goondvr || true
+                break
+              fi
+              
               sleep 60  # Check every minute
               
               # Monitor disk space
@@ -307,7 +326,30 @@ jobs:
               # Show current recording status
               echo "=== Recording Status ($(date)) ==="
               echo "Disk: ${AVAILABLE_GB}GB available (${USED_PERCENT}% used)"
-              find videos -type f \( -name "*.ts" -o -name "*.mp4" \) -exec ls -lh {} \; 2>/dev/null || echo "No files yet"
+              
+              # Check if we have any video files
+              VIDEO_COUNT=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l || echo "0")
+              
+              if [ "$VIDEO_COUNT" -gt 0 ]; then
+                RECORDING_STARTED=true
+                OFFLINE_COUNT=0  # Reset offline count when we have files
+                find videos -type f \( -name "*.ts" -o -name "*.mp4" \) -exec ls -lh {} \; 2>/dev/null | head -10
+              else
+                echo "No files yet"
+                
+                # If recording started but now no new files, increment offline counter
+                if [ "$RECORDING_STARTED" = "true" ]; then
+                  OFFLINE_COUNT=$((OFFLINE_COUNT + 1))
+                  echo "⚠️  No activity detected (check $OFFLINE_COUNT/$MAX_OFFLINE_CHECKS)"
+                  
+                  if [ $OFFLINE_COUNT -ge $MAX_OFFLINE_CHECKS ]; then
+                    echo "🛑 Stream appears to have ended - stopping recording to process files"
+                    pkill -f goondvr || true
+                    break
+                  fi
+                fi
+              fi
+              
               echo "================================"
               
               # Warn if disk space is low
@@ -323,8 +365,8 @@ jobs:
                 break
               fi
               
-              # Find .ts and .mp4 files that haven't been uploaded yet
-              find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | while read VIDEO_FILE; do
+              # Find .ts and .mp4 files that haven't been uploaded yet (limit to 10 per iteration)
+              find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | head -10 | while read VIDEO_FILE; do
                 if [ -f "$VIDEO_FILE" ]; then
                   # Skip if already marked
                   MARKER="${VIDEO_FILE}.uploaded"
@@ -363,41 +405,104 @@ jobs:
           echo "Debug: ${{ inputs.debug || false }}"
           echo "============================"
           
-          # Record without conversion/upload - just save video files
-          timeout 5h ./goondvr \
-            -u "${{ matrix.channel.username }}" \
-            --site "${{ matrix.channel.site }}" \
-            -resolution "$RESOLUTION" \
-            -framerate "$FRAMERATE" \
-            -interval "$INTERVAL" \
-            -max-duration "$MAX_DURATION" \
-            -max-filesize 0 \
-            $DEBUG_FLAG || {
+          # Start recording with a wrapper that monitors for stream end
+          (
+            # Track if we've recorded anything
+            RECORDED_SOMETHING=false
+            CONSECUTIVE_OFFLINE=0
+            MAX_CONSECUTIVE_OFFLINE=5  # Stop after 5 consecutive offline checks (5 * interval minutes)
+            
+            while true; do
+              echo "Starting recording attempt..."
+              
+              # Record without conversion/upload - just save video files
+              timeout 30m ./goondvr \
+                -u "${{ matrix.channel.username }}" \
+                --site "${{ matrix.channel.site }}" \
+                -resolution "$RESOLUTION" \
+                -framerate "$FRAMERATE" \
+                -interval "$INTERVAL" \
+                -max-duration "$MAX_DURATION" \
+                -max-filesize 0 \
+                $DEBUG_FLAG
+              
               EXIT_CODE=$?
-              echo "Recording ended with code $EXIT_CODE"
-              if [ $EXIT_CODE -eq 124 ]; then
-                echo "⏱️  Timeout reached (5 hours) - will auto-restart"
-              else
-                echo "This is normal - streamer may be offline or timeout reached"
+              echo "Recording exited with code $EXIT_CODE"
+              
+              # Check if we have any video files
+              VIDEO_COUNT=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l || echo "0")
+              
+              if [ "$VIDEO_COUNT" -gt 0 ]; then
+                RECORDED_SOMETHING=true
+                echo "✓ Found $VIDEO_COUNT video file(s)"
               fi
-            }
+              
+              # If we've recorded something and keep getting offline, stop
+              if [ "$RECORDED_SOMETHING" = "true" ]; then
+                CONSECUTIVE_OFFLINE=$((CONSECUTIVE_OFFLINE + 1))
+                echo "Stream offline check $CONSECUTIVE_OFFLINE/$MAX_CONSECUTIVE_OFFLINE"
+                
+                if [ $CONSECUTIVE_OFFLINE -ge $MAX_CONSECUTIVE_OFFLINE ]; then
+                  echo "🎬 Stream has ended - proceeding to upload"
+                  break
+                fi
+              fi
+              
+              # If timeout (124), continue recording
+              if [ $EXIT_CODE -eq 124 ]; then
+                echo "⏱️  30-minute check timeout - continuing..."
+                CONSECUTIVE_OFFLINE=0  # Reset since we're actively recording
+                continue
+              fi
+              
+              # Wait before retry
+              echo "Waiting ${INTERVAL} minute(s) before retry..."
+              sleep $((INTERVAL * 60))
+            done
+          ) || {
+            EXIT_CODE=$?
+            echo "Recording wrapper ended with code $EXIT_CODE"
+          }
           
-          # Stop the background uploader
+          # Stop the background monitor
+          echo "Stopping background monitor..."
           kill $UPLOADER_PID 2>/dev/null || true
+          sleep 2
+          
+          # Force kill if still running
+          if kill -0 $UPLOADER_PID 2>/dev/null; then
+            echo "Force killing monitor process..."
+            kill -9 $UPLOADER_PID 2>/dev/null || true
+          fi
+          
+          echo ""
+          echo "=== Finalizing Recording ==="
+          
+          # Give a moment for any final writes
+          sleep 5
           
           # Mark any remaining files as complete (only if non-empty)
+          echo "Marking all completed files..."
+          MARKED_COUNT=0
           find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | while read VIDEO_FILE; do
             if [ -f "$VIDEO_FILE" ]; then
               FILE_SIZE=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || echo "0")
+              MARKER="${VIDEO_FILE}.uploaded"
+              
               if [ "$FILE_SIZE" -gt 0 ]; then
-                touch "${VIDEO_FILE}.uploaded"
-                echo "Marked: $(basename "$VIDEO_FILE") (${FILE_SIZE} bytes)"
+                if [ ! -f "$MARKER" ]; then
+                  touch "$MARKER"
+                  echo "✓ Marked: $(basename "$VIDEO_FILE") (${FILE_SIZE} bytes)"
+                  MARKED_COUNT=$((MARKED_COUNT + 1))
+                fi
               else
-                echo "Skipping empty file: $(basename "$VIDEO_FILE")"
+                echo "⚠️  Skipping empty file: $(basename "$VIDEO_FILE")"
                 rm -f "$VIDEO_FILE"
               fi
             fi
           done
+          
+          echo "Marked $MARKED_COUNT file(s) for upload"
           
           # List completed recordings
           echo "=== Completed Recordings ==="
@@ -686,6 +791,8 @@ jobs:
               
               if (( $(echo "$MP4_SIZE_GB > 5" | bc -l) )); then
                 echo "⚠️  WARNING: Large file (${MP4_SIZE_GB}GB) - upload may be slow"
+                EST_MINUTES=$(echo "$MP4_SIZE_GB * 10" | bc)
+                echo "Estimated upload time: ~${EST_MINUTES} minutes at 10MB/s"
               fi
               
               # Step 2: Upload to GoFile with retry
@@ -766,39 +873,42 @@ jobs:
                     
                     # Use flock for database operations to prevent race conditions
                     (
-                      flock -x 200
-                      
-                      RECORD=$(jq -n \
-                        --arg id "${{ matrix.channel.username }}_$(date +%s)_$$" \
-                        --arg username "${{ matrix.channel.username }}" \
-                        --arg site "${{ matrix.channel.site }}" \
-                        --arg filename "$(basename "$MP4_FILE")" \
-                        --arg link "$DOWNLOAD_LINK" \
-                        --arg uploaded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                        --arg filesize "$FILESIZE" \
-                        --arg upload_duration "$UPLOAD_DURATION" \
-                        --arg upload_speed "$UPLOAD_SPEED" \
-                        --arg convert_duration "$CONVERT_DURATION" \
-                        '{
-                          id: $id,
-                          username: $username,
-                          site: $site,
-                          filename: $filename,
-                          gofile_link: $link,
-                          uploaded_at: $uploaded_at,
-                          filesize_bytes: ($filesize | tonumber),
-                          upload_duration: ($upload_duration | tonumber),
-                          upload_speed: ($upload_speed | tonumber),
-                          convert_duration: ($convert_duration | tonumber),
-                          status: "uploaded"
-                        }')
-                      
-                      if jq ".records += [$RECORD]" database/uploads.json > database/uploads.json.tmp 2>/dev/null; then
-                        mv database/uploads.json.tmp database/uploads.json
-                        echo "✓ Database updated"
+                      # Wait max 30 seconds for lock
+                      if flock -x -w 30 200; then
+                        RECORD=$(jq -n \
+                          --arg id "${{ matrix.channel.username }}_$(date +%s)_$$" \
+                          --arg username "${{ matrix.channel.username }}" \
+                          --arg site "${{ matrix.channel.site }}" \
+                          --arg filename "$(basename "$MP4_FILE")" \
+                          --arg link "$DOWNLOAD_LINK" \
+                          --arg uploaded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                          --arg filesize "$FILESIZE" \
+                          --arg upload_duration "$UPLOAD_DURATION" \
+                          --arg upload_speed "$UPLOAD_SPEED" \
+                          --arg convert_duration "$CONVERT_DURATION" \
+                          '{
+                            id: $id,
+                            username: $username,
+                            site: $site,
+                            filename: $filename,
+                            gofile_link: $link,
+                            uploaded_at: $uploaded_at,
+                            filesize_bytes: ($filesize | tonumber),
+                            upload_duration: ($upload_duration | tonumber),
+                            upload_speed: ($upload_speed | tonumber),
+                            convert_duration: ($convert_duration | tonumber),
+                            status: "uploaded"
+                          }')
+                        
+                        if jq ".records += [$RECORD]" database/uploads.json > database/uploads.json.tmp 2>/dev/null; then
+                          mv database/uploads.json.tmp database/uploads.json
+                          echo "✓ Database updated"
+                        else
+                          echo "✗ Failed to update database"
+                          rm -f database/uploads.json.tmp
+                        fi
                       else
-                        echo "✗ Failed to update database"
-                        rm -f database/uploads.json.tmp
+                        echo "✗ Failed to acquire database lock after 30 seconds"
                       fi
                     ) 200>database/.lock
                     
